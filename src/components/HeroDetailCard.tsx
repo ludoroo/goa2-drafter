@@ -60,15 +60,6 @@ export function HeroDetailCard({
           className="absolute inset-0 bg-cover bg-center bg-no-repeat"
           style={{ backgroundImage: `url(${portraitUrl})` }}
         />
-        <div
-          aria-hidden="true"
-          className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-slate-950/90 to-transparent"
-        />
-        <div className="absolute bottom-2 left-3 right-3 z-10 text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
-          <span aria-label={`${hero.stars} stars`} className="text-base tracking-tight">
-            {'★'.repeat(hero.stars)}
-          </span>
-        </div>
       </div>
 
       {/* Body */}
