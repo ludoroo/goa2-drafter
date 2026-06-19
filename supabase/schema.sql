@@ -382,3 +382,51 @@ end;
 $$;
 
 grant execute on function public.seed_random_picks(text, text, jsonb) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Realtime
+-- ---------------------------------------------------------------------------
+--
+-- `SupabaseGameStore.subscribe` listens to `postgres_changes` on games,
+-- players, and picks. For those events to be delivered, the tables MUST be
+-- members of the `supabase_realtime` publication. On hosted Supabase the
+-- publication already exists; we add our tables idempotently.
+--
+-- `picks` and `games` also get REPLICA IDENTITY FULL so UPDATE/DELETE change
+-- payloads carry the full old row (not strictly required here since the store
+-- re-fetches the snapshot on any event, but it makes the change feed complete
+-- and future-proofs partial-update consumers).
+
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    create publication supabase_realtime;
+  end if;
+end $$;
+
+-- Add tables to the publication only if not already members (idempotent).
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'games'
+  ) then
+    alter publication supabase_realtime add table public.games;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'players'
+  ) then
+    alter publication supabase_realtime add table public.players;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'picks'
+  ) then
+    alter publication supabase_realtime add table public.picks;
+  end if;
+end $$;
+
+alter table public.games  replica identity full;
+alter table public.picks  replica identity full;
+
