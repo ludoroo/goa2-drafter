@@ -44,33 +44,55 @@ describe('SetupPage — Step 1 (Players)', () => {
 })
 
 describe('SetupPage — Step 2 (Teams)', () => {
-  it('randomise splits players into two equal teams and enables Next', async () => {
+  it('lets the organiser assign players to teams manually', async () => {
     const user = userEvent.setup()
     renderSetup()
     // Advance to step 2.
     await user.click(screen.getByRole('button', { name: /^next$/i }))
 
-    // Next is blocked until teams are drawn.
+    // Next is blocked until teams are balanced.
     expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
 
-    // Click the single Randomise button.
-    await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+    // Manually assign: 2 to Red, 2 to Blue (4 players default).
+    const redChips = screen.getAllByRole('switch', { name: 'Red' })
+    const blueChips = screen.getAllByRole('switch', { name: 'Blue' })
+    expect(redChips).toHaveLength(4)
+    await user.click(redChips[0]!)
+    await user.click(redChips[1]!)
+    await user.click(blueChips[2]!)
+    await user.click(blueChips[3]!)
 
-    // Both team panels appear with 2 players each (4 named players total listed).
-    expect(screen.getByText(/red team/i)).toBeInTheDocument()
-    expect(screen.getByText(/blue team/i)).toBeInTheDocument()
-
-    // Next button is now enabled.
+    // Balanced status + Next enabled.
+    expect(screen.getByRole('status')).toHaveTextContent(/balanced/i)
     expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
   })
 
-  it('blocks Next until teams have been randomised', async () => {
+  it('randomise splits players into two equal teams', async () => {
     const user = userEvent.setup()
     renderSetup()
     await user.click(screen.getByRole('button', { name: /^next$/i }))
 
-    // Before randomising, the prompt is shown and Next is disabled.
-    expect(screen.getByRole('status')).toHaveTextContent(/randomise teams/i)
+    await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+
+    const status = screen.getByRole('status')
+    expect(status.textContent).toMatch(/Red:\s*2/)
+    expect(status.textContent).toMatch(/Blue:\s*2/)
+    expect(status.textContent).toMatch(/balanced/i)
+    expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
+  })
+
+  it('blocks Next while teams are unbalanced', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    // Assign 3 of 4 players to Red — unbalanced (Red full would cap at 2, so
+    // the 3rd Red click is a no-op; verify it stays unbalanced + Next disabled).
+    const redChips = screen.getAllByRole('switch', { name: 'Red' })
+    await user.click(redChips[0]!)
+    await user.click(redChips[1]!)
+
+    expect(screen.getByTestId('step-validation')).toHaveTextContent(/teams must be balanced/i)
     expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
   })
 })

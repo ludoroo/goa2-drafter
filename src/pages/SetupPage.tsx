@@ -153,56 +153,72 @@ function Step2Teams({ players, setPlayers }: Step2Props): JSX.Element {
     setPlayers(next)
   }
 
-  const redPlayers = players.filter((p) => p.team === 'red')
-  const bluePlayers = players.filter((p) => p.team === 'blue')
+  const assign = (index: number, team: TeamId): void => {
+    const next = players.slice()
+    const current = next[index] as PlayerDraft
+    // Toggle off if tapping the team the player is already on.
+    next[index] = { ...current, team: current.team === team ? null : team }
+    setPlayers(next)
+  }
 
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-xl font-semibold text-teal-300">Step 2 — Teams</h2>
         <Button variant="secondary" size="sm" onClick={randomise}>
-          {balanced ? 'Randomise again' : 'Randomise teams'}
+          Randomise teams
         </Button>
       </div>
       <p className="mb-6 text-sm text-slate-400">
-        Teams are split evenly at random. Hit randomise until you&apos;re happy with the draw.
+        Assign each player to Red or Blue, or hit randomise for an even split. Each team needs{' '}
+        {target} players.
       </p>
 
-      {balanced ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="rounded-lg border border-red-800/60 bg-red-950/30 p-3">
-            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-red-300">
-              Red team
-            </h3>
-            <ul className="space-y-1">
-              {redPlayers.map((p, i) => (
-                <li key={i} className="text-sm text-slate-200">
-                  {p.name || 'Unnamed player'}
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-lg border border-blue-800/60 bg-blue-950/30 p-3">
-            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-blue-300">
-              Blue team
-            </h3>
-            <ul className="space-y-1">
-              {bluePlayers.map((p, i) => (
-                <li key={i} className="text-sm text-slate-200">
-                  {p.name || 'Unnamed player'}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      ) : (
-        <div
-          className="rounded-md border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-200"
-          role="status"
-        >
-          Hit “Randomise teams” to split the {players.length} players into two even teams.
-        </div>
-      )}
+      <div className="space-y-2">
+        {players.map((p, i) => {
+          const redFull = redCount >= target && p.team !== 'red'
+          const blueFull = blueCount >= target && p.team !== 'blue'
+          return (
+            <div
+              key={i}
+              className="flex items-center justify-between gap-3 rounded-md border border-slate-700 bg-slate-900/50 p-3"
+            >
+              <span className="font-medium text-slate-200">{p.name || `Player ${i + 1}`}</span>
+              <div className="flex gap-2">
+                <Chip
+                  label="Red"
+                  tone="red"
+                  selected={p.team === 'red'}
+                  onClick={() => {
+                    if (!redFull) assign(i, 'red')
+                  }}
+                />
+                <Chip
+                  label="Blue"
+                  tone="blue"
+                  selected={p.team === 'blue'}
+                  onClick={() => {
+                    if (!blueFull) assign(i, 'blue')
+                  }}
+                />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div
+        className={cn(
+          'mt-4 rounded-md border p-3 text-sm',
+          balanced
+            ? 'border-teal-700 bg-teal-950/40 text-teal-200'
+            : 'border-amber-700 bg-amber-950/40 text-amber-200',
+        )}
+        role="status"
+      >
+        Red: {redCount} &middot; Blue: {blueCount}{' '}
+        {balanced ? '— teams are balanced.' : `— assign ${target} players to each side.`}
+      </div>
     </Card>
   )
 }
