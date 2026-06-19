@@ -31,13 +31,13 @@ export function HomePage(): JSX.Element {
             <h2 className="text-xl font-semibold text-teal-300">How it works</h2>
             <ol className="list-decimal space-y-2 pl-5 text-slate-300">
               <li>Pick player count, names, and teams.</li>
-              <li>Choose which hero packs (and individual heroes) are in play.</li>
+              <li>Choose which hero packs, or individual heroes, are in play.</li>
               <li>Pick a draft method &mdash; snake or random.</li>
               <li>Share the generated links with your group.</li>
             </ol>
             <p className="rounded-md border border-slate-700 bg-slate-900/60 p-3 text-sm text-slate-400">
-              No logins, no accounts. Each player gets a magic link &mdash; the board has its own
-              link too. Anyone with a link can play.
+              No logins needed &mdash; each player gets a magic link to pick their hero, and anyone
+              with the game code can see the current selections.
             </p>
             <div className="flex justify-center pt-2">
               <Button
