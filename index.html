@@ -6,6 +6,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Guards of Atlantis 2 game setup & hero drafter" />
     <title>GoA2 Drafter</title>
+    <!--
+      GitHub Pages SPA redirect decoder (rafgraph/spa-github-pages).
+      404.html encodes a deep link like /goa2-drafter/play/ID?t=TOKEN into
+      /goa2-drafter/?/play/ID&t=TOKEN. This script restores the real path
+      before the app/router boots. Must run synchronously in <head>.
+    -->
+    <script type="text/javascript">
+      ;(function (l) {
+        if (l.search[1] === '/') {
+          var decoded = l.search
+            .slice(1)
+            .split('&')
+            .map(function (s) {
+              return s.replace(/~and~/g, '&')
+            })
+            .join('?')
+          window.history.replaceState(null, null, l.pathname.slice(0, -1) + decoded + l.hash)
+        }
+      })(window.location)
+    </script>
   </head>
   <body>
     <div id="root"></div>
