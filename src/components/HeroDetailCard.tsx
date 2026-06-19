@@ -46,8 +46,9 @@ export function HeroDetailCard({
         ×
       </button>
 
-      {/* Portrait */}
-      <div className="relative h-72 w-full shrink-0 overflow-hidden rounded-lg ring-1 ring-slate-700/60 sm:h-auto sm:w-56">
+      {/* Portrait — fixed size (matches the 3:4 card art) so every hero's
+          box is identical regardless of how much body content there is. */}
+      <div className="relative aspect-[3/4] w-full shrink-0 self-start overflow-hidden rounded-lg bg-slate-950 ring-1 ring-slate-700/60 sm:w-56">
         <div
           aria-hidden="true"
           className="absolute inset-0 flex items-center justify-center text-7xl font-black text-slate-100/30"
@@ -57,7 +58,7 @@ export function HeroDetailCard({
         </div>
         <div
           aria-hidden="true"
-          className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+          className="absolute inset-0 bg-contain bg-center bg-no-repeat"
           style={{ backgroundImage: `url(${portraitUrl})` }}
         />
       </div>
