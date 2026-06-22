@@ -1,7 +1,14 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { JSX } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import type { GameStatus, Hero, PickError, PublicPlayer, TeamId } from '@/types'
+import type {
+  DraftTurn,
+  GameStatus,
+  Hero,
+  PickError,
+  PublicPlayer,
+  TeamId,
+} from '@/types'
 import { useGame } from '@/hooks/useGame'
 import { getHeroById } from '@/data/heroes'
 import { heroesPerTeam } from '@/services/draft'
@@ -13,16 +20,23 @@ import { Card, cn } from '@/components/ui'
  * GamePage — a single screen for the whole group, used at `/play/:gameId`.
  *
  * - WITHOUT a `?t=<token>` query param it is the shared, read-only **board**:
- *   live team rosters + whose turn it is. Great for projecting on a TV. The
- *   old `/board/:gameId` route redirects here.
+ *   live team rosters + whose turn it is. Great for projecting on a TV.
  * - WITH a valid `?t=<token>` it is additionally a **player's draft screen**:
- *   the hero selector appears so the holder can pick when it's their turn.
+ *   the hero selector appears so the holder can pick (or ban) when it's their
+ *   turn.
+ *
+ * Generalised across draft methods (T7):
+ * - `snake` / `all-pick` / `random-draft` / `single-draft` — player picks on
+ *   the active turn (`currentTurn.playerId`).
+ * - `pick-and-ban` — collective team turns (`currentTurn.playerId === null`);
+ *   the banner shows the acting team + action kind. Bans appear in a
+ *   dedicated "Bans" section and disable those heroes in the selector.
+ * - `random` — no turns; the page just renders the final rosters.
  *
  * Self-identification note: `GameSnapshot.players` is the token-free
- * `PublicPlayer` projection (every participant reads the snapshot), so the page
- * cannot resolve `t=...` → "which player am I?". We treat `makePick(token, …)`
- * as the authoritative gate and surface its `PickError` results as friendly
- * messages. The current picker is shown by name from `currentPickerId`.
+ * `PublicPlayer` projection, so the page cannot resolve `t=...` → "which
+ * player am I?". We treat `makePick(token, …)` as the authoritative gate and
+ * surface its `PickError` results as friendly messages.
  */
 
 const TEAM_TEXT: Record<TeamId, string> = {
@@ -33,6 +47,11 @@ const TEAM_TEXT: Record<TeamId, string> = {
 const TEAM_DOT: Record<TeamId, string> = {
   red: 'bg-red-500',
   blue: 'bg-blue-500',
+}
+
+const TEAM_LABEL: Record<TeamId, string> = {
+  red: 'Team Red',
+  blue: 'Team Blue',
 }
 
 const STATUS_LABEL: Record<GameStatus, string> = {
@@ -60,6 +79,12 @@ const pickErrorMessage = (err: PickError): string => {
       return 'Your player link is invalid.'
     case 'game-not-found':
       return 'Game not found.'
+    case 'not-in-hand':
+      return "That hero isn't in your hand."
+    case 'hero-banned':
+      return 'That hero is banned.'
+    case 'not-your-team':
+      return "It's the other team's turn."
     default:
       return 'Could not make that pick.'
   }
@@ -84,12 +109,25 @@ function StatusBadge({ status }: { status: GameStatus }): JSX.Element {
   )
 }
 
-interface OnTheClockProps {
+interface TurnBannerProps {
+  currentTurn: DraftTurn | null
   picker: PublicPlayer | null
   isComplete: boolean
 }
 
-function OnTheClockBanner({ picker, isComplete }: OnTheClockProps): JSX.Element {
+/**
+ * Generalised "current turn" indicator. Handles all draft methods:
+ * - `isComplete` → "Draft Complete".
+ * - No `currentTurn` → "Waiting…".
+ * - Player-pick turn → action + player name, team-coloured.
+ * - Collective pick turn (pick-and-ban PICK) → action + team name.
+ * - Ban turn → action + team name, amber/red accent.
+ *
+ * The existing `data-testid="on-the-clock-banner"` is preserved; the
+ * `data-testid="current-pick-banner"` span continues to carry the active
+ * label (player name for player turns, team label for collective turns).
+ */
+function TurnBanner({ currentTurn, picker, isComplete }: TurnBannerProps): JSX.Element {
   if (isComplete) {
     return (
       <Card
@@ -103,7 +141,7 @@ function OnTheClockBanner({ picker, isComplete }: OnTheClockProps): JSX.Element 
     )
   }
 
-  if (!picker) {
+  if (!currentTurn) {
     return (
       <Card
         data-testid="on-the-clock-banner"
@@ -116,27 +154,78 @@ function OnTheClockBanner({ picker, isComplete }: OnTheClockProps): JSX.Element 
     )
   }
 
+  const isBan = currentTurn.kind === 'ban'
+  const isPlayerTurn = currentTurn.kind === 'pick' && picker !== null
+  const team = currentTurn.team
+  // Ban turns get a red/rose accent (matches the BansSection styling); pick
+  // turns keep the amber "on the clock" accent.
+  const banner = isBan
+    ? 'border-rose-500/70 bg-rose-500/10'
+    : 'border-amber-400/70 bg-amber-500/10'
+  const actionLabel = isBan ? 'BAN' : 'PICK'
+  const actionTone = isBan ? 'text-rose-200' : 'text-amber-200'
+  const targetLabel = isPlayerTurn ? picker.name : TEAM_LABEL[team]
+
   return (
     <Card
       data-testid="on-the-clock-banner"
-      className="flex flex-col items-center justify-center gap-2 border-2 border-amber-400/70 bg-amber-500/10 py-6 sm:flex-row sm:gap-4"
+      className={cn(
+        'flex flex-col items-center justify-center gap-2 border-2 py-6 sm:flex-row sm:gap-4',
+        banner,
+      )}
     >
-      <span className="text-sm font-bold uppercase tracking-widest text-amber-200 sm:text-base">
-        On the clock
+      <span
+        data-testid="turn-action"
+        className={cn(
+          'text-sm font-bold uppercase tracking-widest sm:text-base',
+          actionTone,
+        )}
+      >
+        {actionLabel}
       </span>
       <span className="flex items-center gap-3">
-        <span className={cn('h-3 w-3 rounded-full', TEAM_DOT[picker.team])} aria-hidden="true" />
+        <span className={cn('h-3 w-3 rounded-full', TEAM_DOT[team])} aria-hidden="true" />
         <span
           className={cn(
             'text-3xl font-extrabold uppercase tracking-wide sm:text-5xl',
-            TEAM_TEXT[picker.team],
+            TEAM_TEXT[team],
           )}
           data-testid="current-pick-banner"
         >
-          {picker.name}
+          {targetLabel}
         </span>
       </span>
     </Card>
+  )
+}
+
+interface BansSectionProps {
+  bans: string[]
+}
+
+/** Glanceable list of banned heroes — only rendered when there are any. */
+function BansSection({ bans }: BansSectionProps): JSX.Element | null {
+  if (bans.length === 0) return null
+  const heroes = bans.map((id) => ({ id, hero: getHeroById(id) }))
+  return (
+    <section
+      aria-label="Banned heroes"
+      data-testid="bans-section"
+      className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-3"
+    >
+      <h2 className="text-xs font-bold uppercase tracking-widest text-red-300">Bans</h2>
+      <ul className="mt-2 flex flex-wrap gap-2">
+        {heroes.map(({ id, hero }) => (
+          <li
+            key={id}
+            data-testid="ban-item"
+            className="rounded-full border border-red-500/40 bg-red-950/40 px-3 py-1 text-sm text-red-200/80 line-through"
+          >
+            {hero ? hero.name : id}
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
@@ -146,11 +235,24 @@ export function GamePage(): JSX.Element {
   const token = searchParams.get('t')
   const hasToken = token != null && token !== ''
 
-  const { snapshot, loading, error, currentPickerId, isComplete, makePick } = useGame(gameId)
+  const {
+    snapshot,
+    loading,
+    error,
+    currentPickerId,
+    currentTurn,
+    bans,
+    playerView,
+    playerViewStatus,
+    isComplete,
+    makePick,
+  } = useGame(gameId, undefined, token ?? undefined)
 
   const [flash, setFlash] = useState<FlashMessage | null>(null)
 
-  const heroPool = useMemo<Hero[]>(() => {
+  // The full game hero pool (used for all methods except single-draft where
+  // the selector is constrained to the caller's private hand).
+  const gamePoolHeroes = useMemo<Hero[]>(() => {
     if (!snapshot) return []
     const out: Hero[] = []
     for (const id of snapshot.game.heroPool) {
@@ -160,23 +262,42 @@ export function GamePage(): JSX.Element {
     return out
   }, [snapshot])
 
-  const pickedHeroIds = useMemo<string[]>(
-    () => (snapshot ? snapshot.picks.map((p) => p.heroId) : []),
-    [snapshot],
+  // Single-draft players see only their hand — never the full pool.
+  const handHeroes = useMemo<Hero[] | null>(() => {
+    if (!playerView || playerView.hand == null) return null
+    const out: Hero[] = []
+    for (const id of playerView.hand) {
+      const hero = getHeroById(id)
+      if (hero) out.push(hero)
+    }
+    return out
+  }, [playerView])
+
+  // Banned heroes count as "taken" in the selector too.
+  const disabledHeroIds = useMemo<string[]>(
+    () => (snapshot ? [...snapshot.picks.map((p) => p.heroId), ...bans] : []),
+    [snapshot, bans],
   )
 
   const onPick = useCallback(
     async (heroId: string): Promise<void> => {
       if (!hasToken) return
+      // Capture the turn kind BEFORE the call so the flash reflects what
+      // actually happened (the snapshot advances after a successful action).
+      const wasBan = currentTurn?.kind === 'ban'
       const result = await makePick(token, heroId)
       if (result.ok) {
-        const pickedHero = getHeroById(heroId)
-        setFlash({ kind: 'success', text: `Picked ${pickedHero ? pickedHero.name : heroId}.` })
+        const hero = getHeroById(heroId)
+        const name = hero ? hero.name : heroId
+        setFlash({
+          kind: 'success',
+          text: wasBan ? `Banned ${name}.` : `Picked ${name}.`,
+        })
       } else {
         setFlash({ kind: 'error', text: pickErrorMessage(result.error) })
       }
     },
-    [hasToken, token, makePick],
+    [hasToken, token, makePick, currentTurn],
   )
 
   if (gameId === undefined || gameId === '') {
@@ -216,9 +337,51 @@ export function GamePage(): JSX.Element {
   const { game, players, picks } = snapshot
   const perTeam = heroesPerTeam(game.playerCount)
   const picker = currentPickerId ? (players.find((p) => p.id === currentPickerId) ?? null) : null
-  // The selector only appears for a token holder during an active draft.
+
+  // Selector source depends on method. Single-draft is constrained to the
+  // caller's hand; everything else uses the game pool (already trimmed by
+  // the store for random-draft).
+  const isSingleDraft = game.method === 'single-draft'
+
+  // Drives the single-draft side panel: while the player view is fetching we
+  // show a spinner; if it failed or resolved to "no hand" we show an error
+  // card; otherwise the hand-selector renders. For non-single-draft methods
+  // the selector renders straight off the game pool.
+  //
+  // Note: `playerViewStatus === 'loaded' && playerView?.hand == null` means
+  // the store explicitly returned "no hand for this token" — either an
+  // invalid/expired token or a method without hands. For single-draft this
+  // is fatal for the selector; we surface a friendly error rather than spin.
+  let selectorHeroes: Hero[] | null = null
+  let handPending = false
+  let handError = false
+  if (hasToken && !isComplete && game.method !== 'random') {
+    if (isSingleDraft) {
+      if (playerViewStatus === 'loading') {
+        handPending = true
+      } else if (
+        playerViewStatus === 'error' ||
+        playerView === null ||
+        playerView.hand === null ||
+        handHeroes === null ||
+        handHeroes.length === 0
+      ) {
+        handError = true
+      } else {
+        selectorHeroes = handHeroes
+      }
+    } else if (gamePoolHeroes.length > 0) {
+      selectorHeroes = gamePoolHeroes
+    }
+  }
+
+  const isBanTurn = currentTurn?.kind === 'ban'
+  const detailActionLabel = isBanTurn ? 'Ban this hero' : 'Pick this hero'
+
+  // During an active draft, allow the user to attempt an action. The store
+  // is the authoritative gate (player-turn / team-turn / hand). We surface
+  // its friendly errors via the flash.
   const canPick = hasToken && game.status === 'drafting' && !isComplete
-  const showSelector = hasToken && !isComplete && heroPool.length > 0
 
   return (
     <PageShell>
@@ -248,7 +411,7 @@ export function GamePage(): JSX.Element {
         </div>
       </header>
 
-      <OnTheClockBanner picker={picker} isComplete={isComplete} />
+      <TurnBanner currentTurn={currentTurn} picker={picker} isComplete={isComplete} />
 
       {flash ? (
         <div
@@ -263,6 +426,8 @@ export function GamePage(): JSX.Element {
           {flash.text}
         </div>
       ) : null}
+
+      <BansSection bans={bans} />
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <TeamRoster
@@ -281,12 +446,36 @@ export function GamePage(): JSX.Element {
         />
       </section>
 
-      {showSelector ? (
+      {handPending ? (
+        <p
+          data-testid="hand-pending"
+          role="status"
+          className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-3 text-sm text-slate-300"
+        >
+          Loading your hand…
+        </p>
+      ) : null}
+
+      {handError ? (
+        <Card
+          aria-label="hand error"
+          data-testid="hand-error"
+          className="border-2 border-red-500/60 bg-red-950/30"
+        >
+          <h2 className="text-base font-semibold text-red-300">Couldn't load your hand</h2>
+          <p className="mt-1 text-sm text-slate-300">
+            We couldn't load your hand — check your player link.
+          </p>
+        </Card>
+      ) : null}
+
+      {selectorHeroes !== null ? (
         <section aria-label="hero selector">
           <HeroSelector
-            heroes={heroPool}
-            pickedHeroIds={pickedHeroIds}
+            heroes={selectorHeroes}
+            pickedHeroIds={disabledHeroIds}
             canPick={canPick}
+            actionLabel={detailActionLabel}
             onPick={(heroId) => {
               void onPick(heroId)
             }}

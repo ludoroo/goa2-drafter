@@ -33,6 +33,21 @@ const fourPlayerInput = (): CreateGameInput => ({
   ],
 })
 
+const allPickInput = (): CreateGameInput => ({
+  ...fourPlayerInput(),
+  method: 'all-pick',
+})
+
+const pickBanInput = (): CreateGameInput => ({
+  ...fourPlayerInput(),
+  method: 'pick-and-ban',
+})
+
+const singleDraftInput = (): CreateGameInput => ({
+  ...fourPlayerInput(),
+  method: 'single-draft',
+})
+
 const tokenForPlayer = (created: CreatedGame, playerId: string): string => {
   const p = created.players.find((x) => x.id === playerId)
   if (!p) throw new Error('player not found')
@@ -259,5 +274,127 @@ describe('useGame', () => {
     expect(getCalls).toBe(2)
     expect(result.current.snapshot?.picks).toHaveLength(1)
     expect(result.current.snapshot?.game.currentPick).toBe(1)
+  })
+
+  describe('currentTurn / bans / playerView', () => {
+    it('all-pick: currentTurn is a pick turn with a playerId; currentPickerId matches; bans empty', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(allPickInput())
+
+      const { result } = renderHook(() => useGame(created.game.id, store))
+      await waitFor(() => expect(result.current.snapshot).not.toBeNull())
+
+      const turn = result.current.currentTurn
+      expect(turn).not.toBeNull()
+      expect(turn?.kind).toBe('pick')
+      expect(typeof turn?.playerId).toBe('string')
+      expect(turn?.playerId).not.toBeNull()
+      expect(result.current.currentPickerId).toBe(turn?.playerId)
+      expect(result.current.bans).toEqual([])
+    })
+
+    it('pick-and-ban: currentTurn.kind=ban, playerId is null, currentPickerId is null, team is set', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(pickBanInput())
+
+      const { result } = renderHook(() => useGame(created.game.id, store))
+      await waitFor(() => expect(result.current.snapshot).not.toBeNull())
+
+      const turn = result.current.currentTurn
+      expect(turn).not.toBeNull()
+      expect(turn?.kind).toBe('ban')
+      expect(turn?.playerId).toBeNull()
+      expect(result.current.currentPickerId).toBeNull()
+      expect(turn?.team === 'red' || turn?.team === 'blue').toBe(true)
+      expect(result.current.bans).toEqual([])
+    })
+
+    it('single-draft with token: exposes playerView with a 3-card hand for the matching player', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(singleDraftInput())
+      const targetPlayer = created.players[0]
+      const token = targetPlayer.token
+
+      const { result } = renderHook(() => useGame(created.game.id, store, token))
+
+      await waitFor(() => {
+        expect(result.current.playerView).not.toBeNull()
+      })
+
+      expect(result.current.playerView?.player.id).toBe(targetPlayer.id)
+      expect(result.current.playerView?.hand).not.toBeNull()
+      expect(result.current.playerView?.hand?.length).toBe(3)
+      expect(result.current.playerViewStatus).toBe('loaded')
+    })
+
+    it('settles playerViewStatus to "loaded" (not stuck on "loading") for a bogus token', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(singleDraftInput())
+
+      // A token that does NOT match any player — the store returns null.
+      const { result } = renderHook(() =>
+        useGame(created.game.id, store, 'definitely-not-a-real-token'),
+      )
+
+      // Initially we expect 'loading' (a token is present so a fetch is queued).
+      expect(result.current.playerViewStatus).toBe('loading')
+
+      await waitFor(() => {
+        expect(result.current.playerViewStatus).toBe('loaded')
+      })
+      // Bogus token resolves to a null playerView, not an error.
+      expect(result.current.playerView).toBeNull()
+    })
+
+    it('settles playerViewStatus to "loaded" for a valid token on a method without hands (non-single-draft)', async () => {
+      const store = new LocalGameStore()
+      // all-pick has no hands; getPlayerView returns a view whose hand is null.
+      const created = await store.createGame(allPickInput())
+      const token = created.players[0].token
+
+      const { result } = renderHook(() => useGame(created.game.id, store, token))
+
+      await waitFor(() => {
+        expect(result.current.playerViewStatus).toBe('loaded')
+      })
+      // The view itself is present (token matched) but hand is null.
+      expect(result.current.playerView).not.toBeNull()
+      expect(result.current.playerView?.hand).toBeNull()
+    })
+
+    it('no token: playerView stays null', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(singleDraftInput())
+
+      const { result } = renderHook(() => useGame(created.game.id, store))
+      await waitFor(() => expect(result.current.snapshot).not.toBeNull())
+
+      expect(result.current.playerView).toBeNull()
+      expect(result.current.playerViewStatus).toBe('idle')
+    })
+
+    it('bans surface after a ban is committed via the store', async () => {
+      const store = new LocalGameStore()
+      const created = await store.createGame(pickBanInput())
+
+      const { result } = renderHook(() => useGame(created.game.id, store))
+      await waitFor(() => expect(result.current.snapshot).not.toBeNull())
+
+      const firstTurn = result.current.currentTurn
+      expect(firstTurn?.kind).toBe('ban')
+      const banTeam = firstTurn?.team
+      const teamPlayer = created.players.find((p) => p.team === banTeam)
+      if (!teamPlayer) throw new Error('expected a player on the active team')
+      const heroToBan = created.game.heroPool[0]
+
+      await act(async () => {
+        const res = await store.makePick(created.game.id, teamPlayer.token, heroToBan)
+        expect(res.ok).toBe(true)
+      })
+
+      await waitFor(() => {
+        expect(result.current.bans).toContain(heroToBan)
+      })
+    })
   })
 })

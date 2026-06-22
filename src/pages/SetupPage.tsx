@@ -56,9 +56,7 @@ function buildShareUrl(path: string): string {
   return `${window.location.origin}${base}${trimmedPath}`
 }
 
-const HERO_NAMES_BY_ID: ReadonlyMap<string, string> = new Map(
-  HEROES.map((h) => [h.id, h.name]),
-)
+const HERO_NAMES_BY_ID: ReadonlyMap<string, string> = new Map(HEROES.map((h) => [h.id, h.name]))
 
 // ---------------------------------------------------------------------------
 // Result of a successful createGame call — what the final wizard step renders.
@@ -231,9 +229,10 @@ interface Step3Props {
   selected: Set<string>
   setSelected: (next: Set<string>) => void
   minimum: number
+  method: DraftMethod
 }
 
-function Step3HeroPool({ selected, setSelected, minimum }: Step3Props): JSX.Element {
+function Step3HeroPool({ selected, setSelected, minimum, method }: Step3Props): JSX.Element {
   const togglePack = (heroIds: string[], allOn: boolean): void => {
     const next = new Set(selected)
     if (allOn) {
@@ -264,10 +263,19 @@ function Step3HeroPool({ selected, setSelected, minimum }: Step3Props): JSX.Elem
 
   const enough = selected.size >= minimum
 
+  const methodHint =
+    method === 'single-draft'
+      ? 'Single Draft needs 3 heroes per player.'
+      : method === 'pick-and-ban'
+        ? 'Pick & Ban needs extra heroes for the bans.'
+        : method === 'random-draft'
+          ? 'Random Draft needs a couple of extras beyond the player count.'
+          : null
+
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-xl font-semibold text-teal-300">Step 3 — Hero pool</h2>
+        <h2 className="text-xl font-semibold text-teal-300">Step 4 — Hero pool</h2>
         <p
           className={cn('text-sm font-medium', enough ? 'text-teal-300' : 'text-amber-300')}
           aria-live="polite"
@@ -275,10 +283,15 @@ function Step3HeroPool({ selected, setSelected, minimum }: Step3Props): JSX.Elem
           Selected {selected.size} / need &gt;= {minimum}
         </p>
       </div>
-      <p className="mb-4 text-sm text-slate-400">
+      <p className="mb-2 text-sm text-slate-400">
         Add every hero, whole packs, or pick individuals. A small buffer over the minimum keeps the
         draft interesting.
       </p>
+      {methodHint && (
+        <p className="mb-4 text-xs text-amber-300" role="note">
+          {methodHint}
+        </p>
+      )}
 
       <div className="mb-5 flex flex-wrap gap-2">
         <Button
@@ -298,8 +311,7 @@ function Step3HeroPool({ selected, setSelected, minimum }: Step3Props): JSX.Elem
 
       <div className="space-y-5">
         {HERO_PACKS.map((pack) => {
-          const allOn =
-            pack.heroIds.length > 0 && pack.heroIds.every((id) => selected.has(id))
+          const allOn = pack.heroIds.length > 0 && pack.heroIds.every((id) => selected.has(id))
           return (
             <div key={pack.id} className="rounded-lg border border-slate-700 p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -339,8 +351,63 @@ function Step3HeroPool({ selected, setSelected, minimum }: Step3Props): JSX.Elem
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Method
+// Step 3: Method
 // ---------------------------------------------------------------------------
+
+interface MethodOption {
+  value: DraftMethod
+  label: string
+  description: string
+  /** Tailwind classes used when this option is selected. */
+  selectedClasses: string
+  /** Title text color (always applied). */
+  titleClasses: string
+}
+
+const METHOD_OPTIONS: readonly MethodOption[] = [
+  {
+    value: 'snake',
+    label: 'Snake',
+    description: 'Turn-based draft, A-B-B-A order. House favourite.',
+    selectedClasses: 'border-teal-400 bg-teal-950/40',
+    titleClasses: 'text-teal-200',
+  },
+  {
+    value: 'random',
+    label: 'All Random',
+    description: 'Everyone is dealt a random hero. Instant lineup.',
+    selectedClasses: 'border-amber-400 bg-amber-950/40',
+    titleClasses: 'text-amber-200',
+  },
+  {
+    value: 'all-pick',
+    label: 'All Pick',
+    description: 'Players take turns picking from the whole pool, alternating teams.',
+    selectedClasses: 'border-teal-400 bg-teal-950/40',
+    titleClasses: 'text-teal-200',
+  },
+  {
+    value: 'random-draft',
+    label: 'Random Draft',
+    description: 'Players pick from a shared pool of (players + 2) random heroes.',
+    selectedClasses: 'border-amber-400 bg-amber-950/40',
+    titleClasses: 'text-amber-200',
+  },
+  {
+    value: 'single-draft',
+    label: 'Single Draft',
+    description: 'Each player is dealt 3 heroes privately and picks one.',
+    selectedClasses: 'border-teal-400 bg-teal-950/40',
+    titleClasses: 'text-teal-200',
+  },
+  {
+    value: 'pick-and-ban',
+    label: 'Pick & Ban',
+    description: 'Teams alternately ban then pick heroes in the official order.',
+    selectedClasses: 'border-amber-400 bg-amber-950/40',
+    titleClasses: 'text-amber-200',
+  },
+] as const
 
 interface Step4Props {
   method: DraftMethod
@@ -350,44 +417,33 @@ interface Step4Props {
 function Step4Method({ method, setMethod }: Step4Props): JSX.Element {
   return (
     <Card>
-      <h2 className="mb-4 text-xl font-semibold text-teal-300">Step 4 — Draft method</h2>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <button
-          type="button"
-          onClick={() => {
-            setMethod('snake')
-          }}
-          className={cn(
-            'rounded-lg border p-4 text-left transition-colors',
-            method === 'snake'
-              ? 'border-teal-400 bg-teal-950/40'
-              : 'border-slate-700 bg-slate-900/50 hover:border-slate-500',
-          )}
-          aria-pressed={method === 'snake'}
-        >
-          <div className="text-lg font-semibold text-teal-200">Snake</div>
-          <p className="mt-1 text-sm text-slate-400">
-            Players take turns picking heroes in A-B-B-A order. Best for the full GoA2 experience.
-          </p>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMethod('random')
-          }}
-          className={cn(
-            'rounded-lg border p-4 text-left transition-colors',
-            method === 'random'
-              ? 'border-amber-400 bg-amber-950/40'
-              : 'border-slate-700 bg-slate-900/50 hover:border-slate-500',
-          )}
-          aria-pressed={method === 'random'}
-        >
-          <div className="text-lg font-semibold text-amber-200">Random</div>
-          <p className="mt-1 text-sm text-slate-400">
-            Each player is dealt a random hero from the pool &mdash; instant lineup, no drafting.
-          </p>
-        </button>
+      <h2 className="mb-4 text-xl font-semibold text-teal-300">Step 3 — Draft method</h2>
+      <p className="mb-4 text-sm text-slate-400">
+        The starting team is decided by a coin flip when the game is generated.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {METHOD_OPTIONS.map((opt) => {
+          const isSelected = method === opt.value
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => {
+                setMethod(opt.value)
+              }}
+              className={cn(
+                'rounded-lg border p-4 text-left transition-colors',
+                isSelected
+                  ? opt.selectedClasses
+                  : 'border-slate-700 bg-slate-900/50 hover:border-slate-500',
+              )}
+              aria-pressed={isSelected}
+            >
+              <div className={cn('text-lg font-semibold', opt.titleClasses)}>{opt.label}</div>
+              <p className="mt-1 text-sm text-slate-400">{opt.description}</p>
+            </button>
+          )
+        })}
       </div>
     </Card>
   )
@@ -605,8 +661,8 @@ function OrganiserDashboard({ gameId, organiserToken }: OrganiserDashboardProps)
 
       <h3 className="mt-6 mb-2 font-semibold text-slate-100">Players</h3>
       <p className="mb-2 text-xs text-slate-400">
-        Per-player magic links were shown once at creation time and aren&apos;t recoverable here
-        for security reasons. If a player lost their link, regenerate the game.
+        Per-player magic links were shown once at creation time and aren&apos;t recoverable here for
+        security reasons. If a player lost their link, regenerate the game.
       </p>
       <ul className="space-y-1">
         {orderedPlayers.map((p) => (
@@ -618,9 +674,7 @@ function OrganiserDashboard({ gameId, organiserToken }: OrganiserDashboardProps)
             <span
               className={cn(
                 'rounded-full px-2 py-0.5 text-xs font-semibold',
-                p.team === 'red'
-                  ? 'bg-red-900/50 text-red-200'
-                  : 'bg-blue-900/50 text-blue-200',
+                p.team === 'red' ? 'bg-red-900/50 text-red-200' : 'bg-blue-900/50 text-blue-200',
               )}
             >
               {p.team}
@@ -636,7 +690,7 @@ function OrganiserDashboard({ gameId, organiserToken }: OrganiserDashboardProps)
 // Wizard branch — the original 5-step flow.
 // ---------------------------------------------------------------------------
 
-const STEP_LABELS = ['Players', 'Teams', 'Hero pool', 'Method', 'Generate'] as const
+const STEP_LABELS = ['Players', 'Teams', 'Method', 'Hero pool', 'Generate'] as const
 
 function buildInitialPlayers(count: PlayerCount): PlayerDraft[] {
   return Array.from({ length: count }, (_, i) => ({ name: `Player ${i + 1}`, team: null }))
@@ -652,7 +706,7 @@ function SetupWizard(): JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
 
-  const minimum = useMemo(() => minimumPoolSize(playerCount), [playerCount])
+  const minimum = useMemo(() => minimumPoolSize(playerCount, method), [playerCount, method])
 
   const setPlayerCount = (n: PlayerCount): void => {
     setPlayerCountState(n)
@@ -670,7 +724,7 @@ function SetupWizard(): JSX.Element {
 
   const step3Valid = selectedHeroes.size >= minimum
 
-  const stepValid = [step1Valid, step2Valid, step3Valid, true, true]
+  const stepValid = [step1Valid, step2Valid, true, step3Valid, true]
 
   // ---- generate ---------------------------------------------------------
 
@@ -717,15 +771,16 @@ function SetupWizard(): JSX.Element {
       case 1:
         return <Step2Teams players={players} setPlayers={setPlayers} />
       case 2:
+        return <Step4Method method={method} setMethod={setMethod} />
+      case 3:
         return (
           <Step3HeroPool
             selected={selectedHeroes}
             setSelected={setSelectedHeroes}
             minimum={minimum}
+            method={method}
           />
         )
-      case 3:
-        return <Step4Method method={method} setMethod={setMethod} />
       case 4:
       default:
         return (
@@ -743,6 +798,9 @@ function SetupWizard(): JSX.Element {
                 <span className="text-slate-400">Hero pool size:</span> {selectedHeroes.size}
               </li>
             </ul>
+            <p className="mb-3 text-xs text-slate-400">
+              The starting team will be decided by a coin flip when the game is generated.
+            </p>
             {error && (
               <div
                 role="alert"
@@ -809,7 +867,7 @@ function SetupWizard(): JSX.Element {
               {step === 0 && 'Every player needs a name.'}
               {step === 1 &&
                 `Teams must be balanced — assign ${playerCount / 2} players to each side.`}
-              {step === 2 &&
+              {step === 3 &&
                 `Select at least ${minimum} heroes (currently ${selectedHeroes.size}).`}
             </p>
           )}
@@ -845,11 +903,7 @@ export function SetupPage(): JSX.Element {
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-3xl px-6 py-10">
         {gameId ? (
-          <OrganiserDashboard
-            key={gameId}
-            gameId={gameId}
-            organiserToken={organiserToken}
-          />
+          <OrganiserDashboard key={gameId} gameId={gameId} organiserToken={organiserToken} />
         ) : (
           <SetupWizard />
         )}

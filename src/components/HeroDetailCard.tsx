@@ -9,6 +9,8 @@ export interface HeroDetailCardProps {
   canPick?: boolean
   onPick?: () => void
   onClose?: () => void
+  /** Label for the primary action button. Defaults to "Pick this hero". */
+  actionLabel?: string
 }
 
 function packNameFor(packId: Hero['pack']): string {
@@ -25,6 +27,7 @@ export function HeroDetailCard({
   canPick = false,
   onPick,
   onClose,
+  actionLabel = 'Pick this hero',
 }: HeroDetailCardProps): JSX.Element {
   const placeholder = heroPlaceholderStyle(hero.id)
   const portraitUrl = heroImageUrl(hero.imageId)
@@ -123,7 +126,7 @@ export function HeroDetailCard({
             disabled={!canPick}
             onClick={canPick ? onPick : undefined}
           >
-            Pick this hero
+            {actionLabel}
           </Button>
         </div>
       </div>

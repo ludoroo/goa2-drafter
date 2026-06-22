@@ -16,6 +16,8 @@ export interface HeroSelectorProps {
   canPick?: boolean
   /** Called when the user confirms a pick in the detail card. */
   onPick?: (heroId: string) => void
+  /** Label for the detail card's primary action. Defaults to "Pick this hero". */
+  actionLabel?: string
 }
 
 /**
@@ -30,6 +32,7 @@ export function HeroSelector({
   pickedHeroIds,
   canPick = false,
   onPick,
+  actionLabel,
 }: HeroSelectorProps): JSX.Element {
   const { state, setSearch, toggleStar, toggleRole, togglePack, setSort, reset, results } =
     useHeroFilters(heroes)
@@ -178,6 +181,7 @@ export function HeroSelector({
             canPick={detailCanPick}
             onPick={handlePick}
             onClose={closeDetail}
+            actionLabel={actionLabel}
           />
         </div>
       ) : null}

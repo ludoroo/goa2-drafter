@@ -1,13 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { GameSnapshot, GameStore, PickResult } from '@/types'
+import type { DraftTurn, GameSnapshot, GameStore, PickResult, PlayerView } from '@/types'
 import { gameStore as defaultStore } from '@/services/store'
-import { nextPickerId } from '@/services/draft'
+
+/**
+ * Lifecycle of the `playerView` fetch, exposed so callers can distinguish
+ * "still loading the hand" from "fetch settled but the token didn't match
+ * any player" (both leave `playerView === null` but mean very different
+ * things to the UI — e.g. the single-draft selector must surface an error
+ * for the latter rather than spin forever).
+ *
+ * - `idle`    — no token (or no gameId) provided; the player view doesn't apply.
+ * - `loading` — `getPlayerView` is in flight.
+ * - `loaded`  — `getPlayerView` resolved. `playerView` is either a value or
+ *               `null` (meaning the store returned null for this token).
+ * - `error`   — `getPlayerView` threw.
+ */
+export type PlayerViewStatus = 'idle' | 'loading' | 'loaded' | 'error'
 
 export interface UseGameResult {
   snapshot: GameSnapshot | null
   loading: boolean
   error: string | null
   currentPickerId: string | null
+  currentTurn: DraftTurn | null
+  bans: string[]
+  playerView: PlayerView | null
+  playerViewStatus: PlayerViewStatus
   isComplete: boolean
   makePick: (playerToken: string, heroId: string) => Promise<PickResult>
   refresh: () => Promise<void>
@@ -46,6 +64,12 @@ const idleState = (gameId: string | undefined): LoadState => ({
  * The `store` argument is optional — defaults to the singleton `gameStore`.
  * Tests inject a fresh `LocalGameStore` instance for isolation.
  *
+ * The `token` argument is optional — when provided, the hook also fetches the
+ * caller's private `PlayerView` (hand etc.) on mount and whenever
+ * `gameId`/`token` changes. Hands are dealt at game-creation time and are
+ * immutable for the life of the draft, so we deliberately do NOT re-fetch the
+ * player view on every snapshot tick; the initial fetch is sufficient.
+ *
  * Concurrency: every state application is tagged with a monotonically
  * increasing `applyVersion`. A late-arriving `getSnapshot` cannot overwrite a
  * newer subscription/makePick result; conversely a fresh subscription update
@@ -53,7 +77,11 @@ const idleState = (gameId: string | undefined): LoadState => ({
  * sequence number at start; subscription and makePick callbacks mint a fresh
  * sequence at apply time so they reflect "newest information wins".
  */
-export function useGame(gameId: string | undefined, store?: GameStore): UseGameResult {
+export function useGame(
+  gameId: string | undefined,
+  store?: GameStore,
+  token?: string,
+): UseGameResult {
   const activeStore = store ?? defaultStore
 
   // Single combined state keyed by gameId. Resetting during render when the
@@ -62,6 +90,25 @@ export function useGame(gameId: string | undefined, store?: GameStore): UseGameR
   const [state, setState] = useState<LoadState>(() => idleState(gameId))
   if (state.gameId !== (gameId ?? null)) {
     setState(idleState(gameId))
+  }
+
+  const [playerView, setPlayerView] = useState<PlayerView | null>(null)
+  const hasToken = gameId !== undefined && token !== undefined && token !== ''
+  const [playerViewStatus, setPlayerViewStatus] = useState<PlayerViewStatus>(
+    hasToken ? 'loading' : 'idle',
+  )
+  // Track the (gameId, token) identity that `playerView` belongs to so we can
+  // reset it during render when either changes — mirrors the gameId reset on
+  // `state` above and avoids `setState` inside an effect (React 19 lint).
+  const playerViewKeyRef = useRef<string | null>(null)
+  const nextPlayerViewKey = hasToken ? `${gameId}\u0000${token}` : null
+  if (playerViewKeyRef.current !== nextPlayerViewKey) {
+    playerViewKeyRef.current = nextPlayerViewKey
+    if (playerView !== null) setPlayerView(null)
+    // Reset status to match the new identity. The fetch effect below will
+    // transition 'loading' → 'loaded'/'error' once its promise settles.
+    const nextStatus: PlayerViewStatus = nextPlayerViewKey === null ? 'idle' : 'loading'
+    if (playerViewStatus !== nextStatus) setPlayerViewStatus(nextStatus)
   }
 
   // Track mount state to guard against late async resolutions writing to
@@ -144,6 +191,33 @@ export function useGame(gameId: string | undefined, store?: GameStore): UseGameR
     }
   }, [gameId, activeStore, applyState, mintSeq])
 
+  // Fetch the caller's private PlayerView when a token is provided. Hands are
+  // dealt at game creation and never change, so a single fetch on mount /
+  // gameId / token change is sufficient. A simple `cancelled` flag guards
+  // against late resolutions writing to a hook whose token/gameId moved on.
+  // When no token (or no gameId), we rely on the render-time reset above to
+  // clear `playerView` — never `setState` synchronously from inside the
+  // effect body.
+  useEffect(() => {
+    if (gameId === undefined || token === undefined || token === '') return
+    let cancelled = false
+    void (async (): Promise<void> => {
+      try {
+        const view = await activeStore.getPlayerView(gameId, token)
+        if (cancelled || !mountedRef.current) return
+        setPlayerView(view)
+        setPlayerViewStatus('loaded')
+      } catch {
+        if (cancelled || !mountedRef.current) return
+        setPlayerView(null)
+        setPlayerViewStatus('error')
+      }
+    })()
+    return (): void => {
+      cancelled = true
+    }
+  }, [gameId, token, activeStore])
+
   const makePick = useCallback(
     async (playerToken: string, heroId: string): Promise<PickResult> => {
       if (gameId === undefined) {
@@ -195,11 +269,18 @@ export function useGame(gameId: string | undefined, store?: GameStore): UseGameR
     }
   }, [gameId, activeStore, applyState, mintSeq, state.snapshot])
 
-  const currentPickerId = useMemo<string | null>(() => {
+  const currentTurn = useMemo<DraftTurn | null>(() => {
     if (!state.snapshot) return null
     if (state.snapshot.game.status !== 'drafting') return null
-    return nextPickerId(state.snapshot.game.draftOrder, state.snapshot.game.currentPick)
+    return state.snapshot.game.turns[state.snapshot.game.currentPick] ?? null
   }, [state.snapshot])
+
+  const currentPickerId = useMemo<string | null>(() => {
+    if (!currentTurn) return null
+    return currentTurn.playerId
+  }, [currentTurn])
+
+  const bans = useMemo<string[]>(() => state.snapshot?.game.bans ?? [], [state.snapshot])
 
   const isComplete = state.snapshot?.game.status === 'complete'
 
@@ -208,6 +289,10 @@ export function useGame(gameId: string | undefined, store?: GameStore): UseGameR
     loading: state.loading,
     error: state.error,
     currentPickerId,
+    currentTurn,
+    bans,
+    playerView,
+    playerViewStatus,
     isComplete,
     makePick,
     refresh,

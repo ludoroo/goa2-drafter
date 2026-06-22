@@ -25,6 +25,18 @@ function renderSetup(): void {
   renderSetupAt('/setup')
 }
 
+/**
+ * Click the method-card button whose title is `label`. The card's accessible
+ * name is the concatenation of title + description, so we locate the title
+ * `<div>` and click its closest `<button>` ancestor.
+ */
+async function pickMethod(user: ReturnType<typeof userEvent.setup>, label: string): Promise<void> {
+  const titleEl = screen.getByText(label, { selector: 'div' })
+  const button = titleEl.closest('button')
+  if (!button) throw new Error(`No button ancestor for method label "${label}"`)
+  await user.click(button)
+}
+
 describe('SetupPage — Step 1 (Players)', () => {
   it('selecting 4 players shows 4 name inputs', () => {
     renderSetup()
@@ -97,7 +109,32 @@ describe('SetupPage — Step 2 (Teams)', () => {
   })
 })
 
-describe('SetupPage — Step 3 (Hero pool)', () => {
+describe('SetupPage — Step 3 (Method)', () => {
+  it('shows all six draft method options', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+
+    // Step 1 → Step 2.
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    // Randomise teams to satisfy step 2.
+    await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+    // Step 2 → Step 3 (Method).
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    const labels = ['Snake', 'All Random', 'All Pick', 'Random Draft', 'Single Draft', 'Pick & Ban']
+    for (const label of labels) {
+      expect(screen.getByText(label, { selector: 'div' })).toBeInTheDocument()
+    }
+
+    // Six pressable method buttons exist (one per option).
+    const methodButtons = screen.getAllByRole('button', { pressed: false })
+    // Snake (default) is pressed, the other 5 are not.
+    expect(methodButtons.length).toBeGreaterThanOrEqual(5)
+    expect(screen.getAllByRole('button', { pressed: true })).toHaveLength(1)
+  })
+})
+
+describe('SetupPage — Step 4 (Hero pool)', () => {
   it("a pack's Select all selects all heroes in that pack and updates the counter", async () => {
     const user = userEvent.setup()
     renderSetup()
@@ -106,7 +143,9 @@ describe('SetupPage — Step 3 (Hero pool)', () => {
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     // Randomize teams to satisfy step 2.
     await user.click(screen.getByRole('button', { name: /randomise teams/i }))
-    // Step 2 → Step 3.
+    // Step 2 → Step 3 (Method).
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    // Step 3 → Step 4 (Hero pool) — snake is the default, no change needed.
     await user.click(screen.getByRole('button', { name: /^next$/i }))
 
     // Counter starts at 0.
@@ -131,6 +170,44 @@ describe('SetupPage — Step 3 (Hero pool)', () => {
     // Next now enabled.
     expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
   })
+
+  it('selecting Single Draft raises the minimum to 3 heroes per player', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+
+    // Step 1 → Step 2.
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+    // Step 2 → Step 3 (Method).
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    // Pick Single Draft.
+    await pickMethod(user, 'Single Draft')
+
+    // Step 3 → Step 4 (Hero pool).
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    // 4 players × 3 = 12.
+    expect(screen.getByText(/Selected 0 \/ need >= 12/i)).toBeInTheDocument()
+    // Method hint surfaces.
+    expect(screen.getByText(/single draft needs 3 heroes per player/i)).toBeInTheDocument()
+
+    // Next is blocked until 12 heroes are selected.
+    expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
+
+    // Selecting Core alone (7 heroes) is not enough — Next stays disabled.
+    await user.click(screen.getByRole('button', { name: /select all in core set/i }))
+    expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
+
+    // Selecting every hero clears the requirement.
+    await user.click(screen.getByRole('button', { name: /select all heroes/i }))
+    const totalHeroes = HERO_PACKS.reduce((sum, p) => sum + p.heroIds.length, 0)
+    expect(totalHeroes).toBeGreaterThanOrEqual(12)
+    expect(
+      screen.getByText(new RegExp(`Selected ${totalHeroes} / need >= 12`, 'i')),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
+  })
 })
 
 describe('SetupPage — Step 5 (Generate)', () => {
@@ -142,13 +219,15 @@ describe('SetupPage — Step 5 (Generate)', () => {
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     // Randomise teams
     await user.click(screen.getByRole('button', { name: /randomise teams/i }))
-    // Step 2 → 3
+    // Step 2 → 3 (Method)
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    // Pick All Pick to verify a non-default method generates correctly.
+    await pickMethod(user, 'All Pick')
+    // Step 3 → 4 (Hero pool)
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     // Select Core pack
     await user.click(screen.getByRole('button', { name: /select all in core set/i }))
-    // Step 3 → 4
-    await user.click(screen.getByRole('button', { name: /^next$/i }))
-    // Step 4 → 5 (snake is default)
+    // Step 4 → 5 (Generate)
     await user.click(screen.getByRole('button', { name: /^next$/i }))
 
     // Generate.
@@ -158,9 +237,7 @@ describe('SetupPage — Step 5 (Generate)', () => {
     expect(await screen.findByText(/game created/i)).toBeInTheDocument()
 
     // The shared board link points at /play/<id> WITHOUT a token.
-    expect(
-      screen.getByText((content) => /\/play\/[a-z0-9-]+$/i.test(content)),
-    ).toBeInTheDocument()
+    expect(screen.getByText((content) => /\/play\/[a-z0-9-]+$/i.test(content))).toBeInTheDocument()
 
     // 4 player links are shown (one per player), each containing /play/ and a token.
     const playLinks = screen.getAllByText((content) => /\/play\/[^\s?]+\?t=/i.test(content))
@@ -168,9 +245,7 @@ describe('SetupPage — Step 5 (Generate)', () => {
 
     // Organiser link present.
     expect(screen.getByText(/organiser link/i)).toBeInTheDocument()
-    expect(
-      screen.getByText((content) => /\/setup\/[^\s?]+\?t=/i.test(content)),
-    ).toBeInTheDocument()
+    expect(screen.getByText((content) => /\/setup\/[^\s?]+\?t=/i.test(content))).toBeInTheDocument()
   })
 })
 
@@ -203,15 +278,11 @@ describe('SetupPage — organiser dashboard', () => {
 
     // Board link is present.
     expect(screen.getByText(/shared board view/i)).toBeInTheDocument()
-    expect(
-      screen.getByText((content) => content.includes(`/play/${game.id}`)),
-    ).toBeInTheDocument()
+    expect(screen.getByText((content) => content.includes(`/play/${game.id}`))).toBeInTheDocument()
 
     // Organiser link is present (token came from the URL).
     expect(
-      screen.getByText((content) =>
-        content.includes(`/setup/${game.id}?t=${organiserToken}`),
-      ),
+      screen.getByText((content) => content.includes(`/setup/${game.id}?t=${organiserToken}`)),
     ).toBeInTheDocument()
 
     // Each player name is listed.
@@ -276,11 +347,15 @@ describe('SetupPage — share-link copy handler', () => {
     const user = userEvent.setup()
     renderSetup()
 
+    // Players → Teams.
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+    // Teams → Method.
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    // Method → Hero pool (snake is the default).
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     await user.click(screen.getByRole('button', { name: /select all in core set/i }))
-    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    // Hero pool → Generate.
     await user.click(screen.getByRole('button', { name: /^next$/i }))
     await user.click(screen.getByRole('button', { name: /generate game/i }))
 
