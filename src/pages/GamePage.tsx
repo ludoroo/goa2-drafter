@@ -20,10 +20,15 @@ import { Card, cn } from '@/components/ui'
  * GamePage — a single screen for the whole group, used at `/play/:gameId`.
  *
  * - WITHOUT a `?t=<token>` query param it is the shared, read-only **board**:
- *   live team rosters + whose turn it is. Great for projecting on a TV.
+ *   live team rosters + whose turn it is, plus the public hero pool for
+ *   methods that have one (snake / all-pick / random-draft / pick-and-ban) —
+ *   the Pick/Ban action is disabled for spectators. Great for projecting on a TV.
  * - WITH a valid `?t=<token>` it is additionally a **player's draft screen**:
- *   the hero selector appears so the holder can pick (or ban) when it's their
- *   turn.
+ *   the holder can pick (or ban) when it's their turn.
+ *
+ * Pool visibility: the pool is public for snake / all-pick / random-draft /
+ * pick-and-ban (shown to everyone). Only **single-draft** is private — each
+ * player sees only their own dealt hand, token-gated via `getPlayerView`.
  *
  * Generalised across draft methods (T7):
  * - `snake` / `all-pick` / `random-draft` / `single-draft` — player picks on
@@ -338,25 +343,24 @@ export function GamePage(): JSX.Element {
   const perTeam = heroesPerTeam(game.playerCount)
   const picker = currentPickerId ? (players.find((p) => p.id === currentPickerId) ?? null) : null
 
-  // Selector source depends on method. Single-draft is constrained to the
-  // caller's hand; everything else uses the game pool (already trimmed by
-  // the store for random-draft).
+  // Selector source depends on method:
+  //  - single-draft: the caller's PRIVATE hand only (token-gated; spectators
+  //    and other players must never see it).
+  //  - random / all-random: no selector (heroes are auto-dealt).
+  //  - everything else (snake, all-pick, random-draft, pick-and-ban): the pool
+  //    is PUBLIC information, so show it to everyone — board and all players —
+  //    regardless of token. Picking is still gated by `canPick` below, so
+  //    spectators see the pool but the Pick/Ban button is disabled for them.
   const isSingleDraft = game.method === 'single-draft'
 
-  // Drives the single-draft side panel: while the player view is fetching we
-  // show a spinner; if it failed or resolved to "no hand" we show an error
-  // card; otherwise the hand-selector renders. For non-single-draft methods
-  // the selector renders straight off the game pool.
-  //
-  // Note: `playerViewStatus === 'loaded' && playerView?.hand == null` means
-  // the store explicitly returned "no hand for this token" — either an
-  // invalid/expired token or a method without hands. For single-draft this
-  // is fatal for the selector; we surface a friendly error rather than spin.
+  // Single-draft hand panel state (only relevant for a token holder during an
+  // active single-draft game): spinner while fetching, error card on failure /
+  // "no hand", otherwise the hand renders.
   let selectorHeroes: Hero[] | null = null
   let handPending = false
   let handError = false
-  if (hasToken && !isComplete && game.method !== 'random') {
-    if (isSingleDraft) {
+  if (isSingleDraft) {
+    if (hasToken && !isComplete) {
       if (playerViewStatus === 'loading') {
         handPending = true
       } else if (
@@ -370,9 +374,12 @@ export function GamePage(): JSX.Element {
       } else {
         selectorHeroes = handHeroes
       }
-    } else if (gamePoolHeroes.length > 0) {
-      selectorHeroes = gamePoolHeroes
     }
+    // single-draft without a token (board view) → no selector (can't show a
+    // private hand); the board still shows rosters + turn.
+  } else if (game.method !== 'random' && !isComplete && gamePoolHeroes.length > 0) {
+    // Public-pool methods: show the pool to everyone.
+    selectorHeroes = gamePoolHeroes
   }
 
   const isBanTurn = currentTurn?.kind === 'ban'

@@ -92,7 +92,7 @@ describe('GamePage', () => {
     clearStoreSubscriptions()
   })
 
-  it('renders the read-only board (no selector) when no token is present', async () => {
+  it('shows the public pool on the board (no token) but disables picking', async () => {
     const created = await createSnakeGame()
     renderAt(`/play/${created.game.id}`)
 
@@ -100,9 +100,26 @@ describe('GamePage', () => {
     // first picker so may also show in the on-the-clock banner).
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
     expect(screen.getByText('Bob')).toBeInTheDocument()
-    // On-the-clock banner names the first picker.
+    // Turn banner present.
     expect(screen.getByTestId('on-the-clock-banner')).toBeInTheDocument()
-    // No hero selector without a token.
+    // The pool IS public for snake — the selector renders for spectators too…
+    expect(screen.getByLabelText('hero selector')).toBeInTheDocument()
+    // …but a spectator (no token) cannot pick: open a hero and confirm the
+    // Pick button is disabled.
+    const user = userEvent.setup()
+    const firstDomino = await screen.findByRole('button', { name: /arien the tidemaster/i })
+    await user.click(firstDomino)
+    const pickButton = await screen.findByRole('button', { name: /pick this hero/i })
+    expect(pickButton).toBeDisabled()
+  })
+
+  it('keeps the Single Draft pool private on the board (no token shows no selector)', async () => {
+    const created = await createGameWith('single-draft', LARGE_POOL)
+    renderAt(`/play/${created.game.id}`)
+
+    // Board renders rosters…
+    expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
+    // …but NO selector: a private hand must never be shown without a token.
     expect(screen.queryByLabelText('hero selector')).not.toBeInTheDocument()
   })
 
