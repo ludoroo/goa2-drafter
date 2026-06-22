@@ -1,4 +1,12 @@
-import type { CreateGameInput, Game, GameSnapshot, GameStore, PickResult, Player } from '@/types'
+import type {
+  CreateGameInput,
+  Game,
+  GameSnapshot,
+  GameStore,
+  PickResult,
+  Player,
+  PlayerView,
+} from '@/types'
 import { createSupabaseClient } from '@/services/supabase'
 
 /**
@@ -50,6 +58,11 @@ export class LazySupabaseGameStore implements GameStore {
   async makePick(gameId: string, playerToken: string, heroId: string): Promise<PickResult> {
     const store = await this.load()
     return store.makePick(gameId, playerToken, heroId)
+  }
+
+  async getPlayerView(gameId: string, token: string): Promise<PlayerView | null> {
+    const store = await this.load()
+    return store.getPlayerView(gameId, token)
   }
 
   subscribe(gameId: string, cb: (snap: GameSnapshot) => void): () => void {

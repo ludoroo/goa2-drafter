@@ -1,14 +1,26 @@
 import type {
   CreateGameInput,
+  DraftTurn,
   Game,
   GameSnapshot,
   GameStore,
   Pick,
+  PickError,
   PickResult,
+  PlayerView,
   Player,
   PublicPlayer,
 } from '@/types'
-import { buildSnakeDraftOrder, nextPickerId, randomAssignment } from '@/services/draft'
+import {
+  buildAllPickTurns,
+  buildAlternatingOrder,
+  buildPickBanTurns,
+  buildSnakeDraftOrder,
+  coinFlipTeam,
+  dealHands,
+  randomAssignment,
+  selectRandomDraftPool,
+} from '@/services/draft'
 import { generateGameCode, generateToken } from '@/utils/ids'
 
 const KEY_PREFIX = 'goa2:game:'
@@ -33,12 +45,33 @@ const toPublicPlayer = (p: Player): PublicPlayer => ({
  * snapshot returned to callers never carries tokens, while `makePick` still
  * needs to resolve a token → player id internally.
  *
+ * `hands` carries the private, per-player dealt hand of hero ids used by the
+ * single-draft method. It is intentionally NOT projected into the shared
+ * snapshot (snapshot.players is the public projection) and is only exposed
+ * through `getPlayerView`, which requires the caller's magic-link token.
+ *
  * Callers of `getSnapshot` only ever see `.snapshot`.
  */
 interface PersistedRecord {
   snapshot: GameSnapshot
   tokens: Record<string, string>
+  hands: Record<string, string[]>
   rev: number
+}
+
+/**
+ * Normalize a possibly-legacy persisted `Game` into the current shape. Older
+ * records pre-date the addition of `turns`, `bans`, and `startTeam` — we
+ * default them to empty/`red` so old games still load without throwing.
+ */
+const normalizeGame = (raw: unknown): Game => {
+  const g = raw as Partial<Game> & Record<string, unknown>
+  return {
+    ...(g as Game),
+    turns: Array.isArray(g.turns) ? (g.turns as DraftTurn[]) : [],
+    bans: Array.isArray(g.bans) ? (g.bans as string[]) : [],
+    startTeam: g.startTeam === 'blue' ? 'blue' : 'red',
+  }
 }
 
 /**
@@ -103,7 +136,8 @@ const isWindowLike = (
  * Local, browser-only implementation of `GameStore` backed by `localStorage`.
  *
  * Persistence layout:
- *   `goa2:game:<id>`       → JSON-serialised `PersistedRecord` ({ snapshot, rev })
+ *   `goa2:game:<id>`       → JSON-serialised `PersistedRecord`
+ *                            ({ snapshot, tokens, hands, rev })
  *   `goa2:game:<id>:org`   → organiser token (kept separate from the snapshot
  *                             so `Game` / `GameSnapshot` stay clean)
  *
@@ -146,12 +180,20 @@ export class LocalGameStore implements GameStore {
 
     const now = Date.now()
     const organiserToken = generateToken()
+    const startTeam = coinFlipTeam()
 
     let game: Game
-    let picks: Pick[]
+    let picks: Pick[] = []
+    let hands: Record<string, string[]> = {}
 
     if (input.method === 'snake') {
       const draftOrder = buildSnakeDraftOrder(players)
+      const byId = new Map(players.map((p) => [p.id, p]))
+      const turns: DraftTurn[] = draftOrder.map((pid) => ({
+        kind: 'pick',
+        playerId: pid,
+        team: byId.get(pid)!.team,
+      }))
       game = {
         id,
         status: 'drafting',
@@ -160,10 +202,12 @@ export class LocalGameStore implements GameStore {
         heroPool: [...input.heroPool],
         draftOrder,
         currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
         createdAt: now,
       }
-      picks = []
-    } else {
+    } else if (input.method === 'random') {
       const ordered = [...players].sort((a, b) => a.seat - b.seat)
       const assignment = randomAssignment(
         ordered.map((p) => p.id),
@@ -184,6 +228,80 @@ export class LocalGameStore implements GameStore {
         heroPool: [...input.heroPool],
         draftOrder: [],
         currentPick: 0,
+        turns: [],
+        bans: [],
+        startTeam,
+        createdAt: now,
+      }
+    } else if (input.method === 'all-pick') {
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'all-pick',
+        heroPool: [...input.heroPool],
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: now,
+      }
+    } else if (input.method === 'random-draft') {
+      const trimmedPool = selectRandomDraftPool(input.heroPool, input.playerCount)
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'random-draft',
+        heroPool: trimmedPool,
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: now,
+      }
+    } else if (input.method === 'single-draft') {
+      const seatOrdered = [...players].sort((a, b) => a.seat - b.seat || a.id.localeCompare(b.id))
+      hands = dealHands(
+        seatOrdered.map((p) => p.id),
+        input.heroPool,
+        3,
+      )
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'single-draft',
+        heroPool: [...input.heroPool],
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: now,
+      }
+    } else {
+      // pick-and-ban
+      const turns = buildPickBanTurns(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'pick-and-ban',
+        heroPool: [...input.heroPool],
+        draftOrder: [],
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
         createdAt: now,
       }
     }
@@ -191,7 +309,7 @@ export class LocalGameStore implements GameStore {
     const snapshot: GameSnapshot = { game, players: players.map(toPublicPlayer), picks }
     const tokens: Record<string, string> = {}
     for (const p of players) tokens[p.id] = p.token
-    this.writeRecord(id, snapshot, tokens, 0)
+    this.writeRecord(id, snapshot, tokens, hands, 0)
     this.storage.setItem(organiserKey(id), organiserToken)
     this.notify(id, snapshot)
 
@@ -201,6 +319,17 @@ export class LocalGameStore implements GameStore {
   getSnapshot(gameId: string): Promise<GameSnapshot | null> {
     const record = this.readRecord(gameId)
     return Promise.resolve(record ? record.snapshot : null)
+  }
+
+  getPlayerView(gameId: string, token: string): Promise<PlayerView | null> {
+    const record = this.readRecord(gameId)
+    if (!record) return Promise.resolve(null)
+    const playerId = Object.keys(record.tokens).find((id) => record.tokens[id] === token)
+    if (!playerId) return Promise.resolve(null)
+    const player = record.snapshot.players.find((p) => p.id === playerId)
+    if (!player) return Promise.resolve(null)
+    const hand = record.hands[playerId] ?? null
+    return Promise.resolve({ player, hand })
   }
 
   makePick(gameId: string, playerToken: string, heroId: string): Promise<PickResult> {
@@ -217,35 +346,96 @@ export class LocalGameStore implements GameStore {
       // Resolve the caller's token via the private tokens map; snapshot.players
       // is intentionally token-free (see PublicPlayer in types).
       const playerId = Object.keys(record.tokens).find((id) => record.tokens[id] === playerToken)
-      const player = playerId ? snap.players.find((p) => p.id === playerId) : undefined
-      if (!player) return Promise.resolve({ ok: false, error: 'invalid-token' })
-      if (nextPickerId(snap.game.draftOrder, snap.game.currentPick) !== player.id) {
-        return Promise.resolve({ ok: false, error: 'not-your-turn' })
-      }
-      if (!snap.game.heroPool.includes(heroId)) {
-        return Promise.resolve({ ok: false, error: 'hero-unavailable' })
-      }
-      if (snap.picks.some((pk) => pk.heroId === heroId)) {
-        return Promise.resolve({ ok: false, error: 'hero-unavailable' })
+      const caller = playerId ? snap.players.find((p) => p.id === playerId) : undefined
+      if (!caller) return Promise.resolve({ ok: false, error: 'invalid-token' })
+
+      const currentTurn = snap.game.turns[snap.game.currentPick]
+      if (!currentTurn) {
+        return Promise.resolve({ ok: false, error: 'game-not-drafting' })
       }
 
-      const pick: Pick = {
-        id: generateToken(),
-        playerId: player.id,
-        heroId,
-        pickIndex: snap.game.currentPick,
-        createdAt: Date.now(),
+      // Authorisation: player-pick vs collective team turn.
+      if (currentTurn.playerId !== null) {
+        if (caller.id !== currentTurn.playerId) {
+          return Promise.resolve({ ok: false, error: 'not-your-turn' })
+        }
+      } else {
+        if (caller.team !== currentTurn.team) {
+          return Promise.resolve({ ok: false, error: 'not-your-team' })
+        }
       }
+
+      // Availability — common checks first.
+      const alreadyPicked = snap.picks.some((pk) => pk.heroId === heroId)
+      if (alreadyPicked) {
+        return Promise.resolve({ ok: false, error: 'hero-unavailable' })
+      }
+      if (snap.game.bans.includes(heroId)) {
+        return Promise.resolve({ ok: false, error: 'hero-banned' })
+      }
+
+      if (snap.game.method === 'single-draft') {
+        const hand = record.hands[caller.id] ?? []
+        if (!hand.includes(heroId)) {
+          return Promise.resolve({ ok: false, error: 'not-in-hand' })
+        }
+      } else {
+        if (!snap.game.heroPool.includes(heroId)) {
+          return Promise.resolve({ ok: false, error: 'hero-unavailable' })
+        }
+      }
+
+      // Commit.
+      let nextPicks = snap.picks
+      let nextBans = snap.game.bans
+
+      if (currentTurn.kind === 'ban') {
+        nextBans = [...snap.game.bans, heroId]
+      } else {
+        // Determine the owning playerId.
+        let ownerId: string
+        if (currentTurn.playerId !== null) {
+          ownerId = currentTurn.playerId
+        } else {
+          // Collective pick: claim per-player on currentTurn.team, seat-ordered.
+          const claimed = new Set(snap.picks.map((pk) => pk.playerId))
+          const candidate = [...snap.players]
+            .filter((p) => p.team === currentTurn.team && !claimed.has(p.id))
+            .sort((a, b) => a.seat - b.seat || a.id.localeCompare(b.id))[0]
+          if (!candidate) {
+            // Shouldn't happen if turns are well-formed, but bail safely.
+            return Promise.resolve({ ok: false, error: 'game-not-drafting' satisfies PickError })
+          }
+          ownerId = candidate.id
+        }
+        const pick: Pick = {
+          id: generateToken(),
+          playerId: ownerId,
+          heroId,
+          pickIndex: snap.game.currentPick,
+          createdAt: Date.now(),
+        }
+        nextPicks = [...snap.picks, pick]
+      }
+
       const nextCurrent = snap.game.currentPick + 1
-      const nextStatus = nextCurrent >= snap.game.draftOrder.length ? 'complete' : snap.game.status
+      const remainingTurns = snap.game.turns.slice(nextCurrent)
+      const anyRemainingPick = remainingTurns.some((t) => t.kind === 'pick')
+      const nextStatus: Game['status'] = anyRemainingPick ? 'drafting' : 'complete'
+
       const nextSnap: GameSnapshot = {
-        game: { ...snap.game, currentPick: nextCurrent, status: nextStatus },
+        game: {
+          ...snap.game,
+          currentPick: nextCurrent,
+          status: nextStatus,
+          bans: nextBans,
+        },
         players: snap.players,
-        picks: [...snap.picks, pick],
+        picks: nextPicks,
       }
 
       // Compare-and-set: only commit if `rev` hasn't advanced since we read.
-      if (this.casWrite(gameId, record.rev, nextSnap, record.tokens)) {
+      if (this.casWrite(gameId, record.rev, nextSnap, record.tokens, record.hands)) {
         this.notify(gameId, nextSnap)
         return Promise.resolve({ ok: true, snapshot: nextSnap })
       }
@@ -298,7 +488,9 @@ export class LocalGameStore implements GameStore {
     const raw = this.storage.getItem(snapshotKey(gameId))
     if (raw === null) return null
     try {
-      const parsed = JSON.parse(raw) as PersistedRecord
+      const parsed = JSON.parse(raw) as Partial<PersistedRecord> & {
+        snapshot?: { game?: unknown; players?: PublicPlayer[]; picks?: Pick[] }
+      }
       if (
         !parsed ||
         typeof parsed.rev !== 'number' ||
@@ -308,7 +500,24 @@ export class LocalGameStore implements GameStore {
       ) {
         return null
       }
-      return parsed
+      const rawSnap = parsed.snapshot
+      if (!rawSnap.game || !rawSnap.players || !rawSnap.picks) return null
+      const game = normalizeGame(rawSnap.game)
+      const snapshot: GameSnapshot = {
+        game,
+        players: rawSnap.players as PublicPlayer[],
+        picks: rawSnap.picks as Pick[],
+      }
+      const hands =
+        parsed.hands && typeof parsed.hands === 'object'
+          ? (parsed.hands as Record<string, string[]>)
+          : {}
+      return {
+        snapshot,
+        tokens: parsed.tokens as Record<string, string>,
+        hands,
+        rev: parsed.rev,
+      }
     } catch {
       return null
     }
@@ -318,9 +527,10 @@ export class LocalGameStore implements GameStore {
     gameId: string,
     snapshot: GameSnapshot,
     tokens: Record<string, string>,
+    hands: Record<string, string[]>,
     rev: number,
   ): void {
-    const record: PersistedRecord = { snapshot, tokens, rev }
+    const record: PersistedRecord = { snapshot, tokens, hands, rev }
     this.storage.setItem(snapshotKey(gameId), JSON.stringify(record))
   }
 
@@ -334,10 +544,11 @@ export class LocalGameStore implements GameStore {
     expectedRev: number,
     nextSnapshot: GameSnapshot,
     tokens: Record<string, string>,
+    hands: Record<string, string[]>,
   ): boolean {
     const current = this.readRecord(gameId)
     if (!current || current.rev !== expectedRev) return false
-    this.writeRecord(gameId, nextSnapshot, tokens, expectedRev + 1)
+    this.writeRecord(gameId, nextSnapshot, tokens, hands, expectedRev + 1)
     return true
   }
 

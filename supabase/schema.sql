@@ -11,8 +11,9 @@
 -- Option B (psql against the project's connection string):
 --   psql "$SUPABASE_DB_URL" -f supabase/schema.sql
 --
--- Re-running is safe-ish: tables use `create table if not exists`, the RPC
--- uses `create or replace`, and policies are dropped+recreated.
+-- Re-running is safe-ish: tables use `create table if not exists`, columns are
+-- added with `add column if not exists`, RPCs use `create or replace`, and
+-- policies are dropped+recreated.
 --
 -- WHAT THIS DEFINES
 -- -----------------
@@ -20,6 +21,14 @@
 --   * Row Level Security with permissive anon SELECT/INSERT (see SECURITY).
 --   * The `make_pick` SECURITY DEFINER RPC consumed by SupabaseGameStore via
 --     `client.rpc('make_pick', { p_game_id, p_player_token, p_hero_id })`.
+--     This RPC implements the generalised per-method draft logic that mirrors
+--     `LocalGameStore.makePick` (turn list, bans, hand checks, claim-per-
+--     player on collective turns, completion when no remaining 'pick' turns).
+--   * The `seed_random_picks` SECURITY DEFINER RPC for one-shot random-method
+--     game creation.
+--   * The `get_player_view` SECURITY DEFINER RPC — the ONLY path through which
+--     a `players.hand` value is ever returned to the client. The hand column
+--     is private; it is never projected into the shared snapshot.
 --
 -- SECURITY MODEL
 -- --------------
@@ -27,25 +36,52 @@
 -- Supabase anon key shipped to the browser. Game ids are short codes but
 -- player and organiser tokens are 128-bit unguessable strings (see
 -- `src/utils/ids.ts`). Authorisation is therefore "knowledge of the token"
--- rather than identity-based:
+-- rather than identity-based.
 --
---   * SELECT is open to anon — anyone with a game id can fetch the snapshot.
---     The shared snapshot path (`SupabaseGameStore.getSnapshot`) only selects
---     non-token columns from `players`, so participants cannot read each
---     other's `players.token`. The `make_pick` RPC verifies a token without
---     leaking it.
+-- Sensitive columns — these MUST NEVER reach a client over the anon key:
+--   * `games.organiser_token`  — the organiser's auth material
+--   * `players.token`          — each player's magic-link auth material
+--   * `players.hand`           — single-draft private dealt hand
+--
+-- Defence in depth — three layers of protection for the sensitive columns:
+--
+--   1. Column-level GRANTs (defined below). Anon's `select` privilege on
+--      `games` and `players` is REVOKED, then re-granted ONLY on the
+--      non-sensitive columns. A direct `select organiser_token from games`
+--      or `select token, hand from players` over the anon key is rejected
+--      by Postgres before RLS even runs. SECURITY DEFINER RPCs run as the
+--      table owner and bypass these grants so they can still read the
+--      sensitive columns internally.
+--
+--   2. Explicit safe projections in app code. `SupabaseGameStore.getSnapshot`
+--      lists exactly the non-sensitive columns in its `.select(...)`. The
+--      `make_pick`, `seed_random_picks`, and `get_player_view` RPCs build
+--      their `game` and `players` payload pieces with explicit
+--      `jsonb_build_object(...)` — never `to_jsonb(g)` on a games row,
+--      because that would include `organiser_token`.
+--
+--   3. RLS policies (below) gate row-level access; the column GRANTs gate
+--      column-level access. Both are needed to permit safe reads while
+--      forbidding sensitive reads.
+--
+-- Other access rules:
+--
 --   * INSERT on `games` and `players` is open to anon for the create-game
 --     flow. A malicious client can spam rows but cannot read or mutate other
 --     people's games without guessing tokens.
 --   * INSERT on `picks` is NOT granted to anon. All pick mutations go through
 --     SECURITY DEFINER RPCs that enforce the rules atomically:
---       - `make_pick`           — snake-draft turn order + hero availability
+--       - `make_pick`           — generalised per-method turn order, hand
+--                                 / ban / pool / availability checks
 --       - `seed_random_picks`   — random-method assignments at create time,
 --                                 gated by the organiser token
 --   * UPDATE and DELETE are not granted to anon at all.
 --   * Picks have unique (game_id, hero_id) and unique (game_id, player_id) so
 --     a regression in app code can never produce a double-pick or two heroes
 --     for one player.
+--   * `get_player_view` is the ONLY path that returns a `players.hand` value
+--     to a client, and it only ever returns the caller's OWN hand (resolved
+--     by the caller's player token).
 --
 -- A stricter model (auth-backed identities, per-row policies tying writes to
 -- the caller's player token, moving the entire create flow into a SECURITY
@@ -60,13 +96,36 @@ create table if not exists public.games (
   id               text primary key,
   status           text not null check (status in ('setup', 'drafting', 'complete')),
   player_count     int  not null,
-  method           text not null check (method in ('snake', 'random')),
+  method           text not null,
   hero_pool        jsonb not null default '[]'::jsonb,
   draft_order      jsonb not null default '[]'::jsonb,
   current_pick     int  not null default 0,
   organiser_token  text not null,
   created_at       timestamptz not null default now()
 );
+
+-- New columns introduced alongside the generalised draft methods. Defaulted
+-- for back-compat with rows created before the column existed.
+alter table public.games
+  add column if not exists turns      jsonb not null default '[]'::jsonb;
+alter table public.games
+  add column if not exists bans       jsonb not null default '[]'::jsonb;
+alter table public.games
+  add column if not exists start_team text  not null default 'red';
+
+-- Refresh the method check constraint to include the new draft methods.
+do $$ begin
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'games_method_check' and conrelid = 'public.games'::regclass
+  ) then
+    alter table public.games drop constraint games_method_check;
+  end if;
+end $$;
+
+alter table public.games
+  add constraint games_method_check
+  check (method in ('snake', 'random', 'all-pick', 'random-draft', 'single-draft', 'pick-and-ban'));
 
 create table if not exists public.players (
   id       text primary key,
@@ -76,6 +135,12 @@ create table if not exists public.players (
   token    text not null unique,
   seat     int  not null
 );
+
+-- Private per-player hand of hero ids (single-draft method only). Nullable;
+-- never projected into the shared snapshot (see SECURITY MODEL above). Only
+-- delivered to the owning player through the token-gated `get_player_view`.
+alter table public.players
+  add column if not exists hand jsonb;
 
 create index if not exists players_game_id_idx on public.players(game_id);
 
@@ -143,21 +208,74 @@ create policy picks_anon_select   on public.picks   for select to anon using (tr
 -- through the make_pick RPC below, which bypasses RLS via SECURITY DEFINER.
 
 -- ---------------------------------------------------------------------------
+-- Column-level privileges (defence in depth for sensitive columns)
+-- ---------------------------------------------------------------------------
+--
+-- RLS policies above gate ROW-level access; the column GRANTs below gate
+-- COLUMN-level access. Anon must NOT be able to read `games.organiser_token`,
+-- `players.token`, or `players.hand` over a direct table SELECT — those are
+-- secrets in the app's threat model. We revoke the broad table SELECT and
+-- re-grant only the non-sensitive columns. Postgres rejects a column-level
+-- read of an ungranted column before RLS runs, so even a malicious client
+-- crafting `select organiser_token from games` is refused.
+--
+-- SECURITY DEFINER RPCs (`make_pick`, `seed_random_picks`, `get_player_view`)
+-- run as the table owner and bypass these grants, so they can still read the
+-- sensitive columns internally for token verification and `get_player_view`'s
+-- caller-only hand return.
+--
+-- Idempotent: REVOKE on a privilege that isn't held is a no-op, and GRANT on
+-- a privilege that's already held is a no-op.
+
+revoke select on public.games   from anon;
+grant  select (
+  id, status, player_count, method, hero_pool, draft_order, current_pick,
+  turns, bans, start_team, created_at
+) on public.games to anon;
+
+revoke select on public.players from anon;
+grant  select (id, game_id, name, team, seat) on public.players to anon;
+
+-- `picks` has no sensitive columns; the broad table SELECT stays.
+
+-- ---------------------------------------------------------------------------
 -- make_pick RPC
 -- ---------------------------------------------------------------------------
 --
--- Atomic validate-and-commit for a single pick. Locks the game row with
--- SELECT ... FOR UPDATE so two concurrent calls serialise on the same game.
+-- Atomic validate-and-commit for a single pick / ban. Locks the game row
+-- with SELECT ... FOR UPDATE so two concurrent calls serialise on the same
+-- game. Mirrors the generalised `LocalGameStore.makePick` logic:
+--
+--   * Resolve caller by (game_id, token) → invalid-token if no match.
+--   * Look up `games.turns[current_pick]` (jsonb array, 0-based).
+--   * Authorise: per-player turns require caller.id = turn.playerId;
+--     collective turns (playerId is null) require caller.team = turn.team.
+--   * Availability: hero must not be already picked, not banned, and
+--       - for single-draft: must be in the caller's private hand;
+--       - otherwise: must be in `games.hero_pool`.
+--   * Commit:
+--       - ban  → append hero to `games.bans`, no pick row inserted.
+--       - pick → owner is `turn.playerId` if not null, else the player on
+--         `turn.team` with the lowest seat (tie: id) who has no pick yet;
+--         insert a pick row with `pick_index = current_pick`.
+--   * Advance `current_pick`. Status flips to 'complete' iff there is no
+--     remaining turn at index >= new current_pick with kind = 'pick'.
 --
 -- Returns jsonb. On failure: { "error": <code> } where <code> is one of the
 -- PickError union values in src/types/index.ts. On success:
 --   {
---     "game":    <games row as jsonb>,
---     "players": [<players rows as jsonb>],
+--     "game":    <safe games projection — every column EXCEPT
+--                 organiser_token; map 1:1 to SnapshotGameRow in
+--                 SupabaseGameStore.ts>,
+--     "players": [<players rows projected to id, game_id, name, team, seat>],
 --     "picks":   [<picks rows as jsonb>]
 --   }
--- The row shapes use snake_case columns — they map 1:1 to the GameRow /
--- PlayerRow / PickRow interfaces in SupabaseGameStore.ts.
+-- The row shapes use snake_case columns — they map 1:1 to the SnapshotGameRow
+-- / PublicPlayerRow / PickRow interfaces in SupabaseGameStore.ts. The game
+-- projection is built with an EXPLICIT jsonb_build_object so `to_jsonb(g)`
+-- never accidentally serialises `organiser_token` into the shared payload.
+-- Player rows are projected to the public (token-free, hand-free) shape so
+-- the snapshot never leaks auth material or private hands.
 
 create or replace function public.make_pick(
   p_game_id       text,
@@ -170,14 +288,18 @@ security definer
 set search_path = public
 as $$
 declare
-  v_game        public.games%rowtype;
-  v_player      public.players%rowtype;
-  v_order_len   int;
-  v_expected_id text;
-  v_pick_index  int;
-  v_new_status  text;
-  v_pick_id     text;
-  v_result      jsonb;
+  v_game             public.games%rowtype;
+  v_player           public.players%rowtype;
+  v_turns_len        int;
+  v_current_turn     jsonb;
+  v_turn_kind        text;
+  v_turn_player_id   text;
+  v_turn_team        text;
+  v_owner_id         text;
+  v_new_status       text;
+  v_pick_id          text;
+  v_has_remaining    boolean;
+  v_result           jsonb;
 begin
   -- 1. Lock the game row.
   select * into v_game
@@ -203,19 +325,34 @@ begin
     return jsonb_build_object('error', 'invalid-token');
   end if;
 
-  -- 4. Turn check — draft_order is a jsonb array of player ids, 0-based.
-  v_order_len := jsonb_array_length(v_game.draft_order);
-  v_expected_id := v_game.draft_order ->> v_game.current_pick;
-
-  if v_expected_id is null or v_expected_id <> v_player.id then
-    return jsonb_build_object('error', 'not-your-turn');
+  -- 4. Current turn lookup. `turns` is a jsonb array of
+  --    { kind, playerId, team } objects; `current_pick` is 0-based.
+  v_turns_len := coalesce(jsonb_array_length(v_game.turns), 0);
+  if v_game.current_pick < 0 or v_game.current_pick >= v_turns_len then
+    return jsonb_build_object('error', 'game-not-drafting');
   end if;
 
-  -- 5. Hero availability — must be in the pool and not already picked.
-  if not (v_game.hero_pool ? p_hero_id) then
-    return jsonb_build_object('error', 'hero-unavailable');
+  v_current_turn   := v_game.turns -> v_game.current_pick;
+  if v_current_turn is null or jsonb_typeof(v_current_turn) <> 'object' then
+    return jsonb_build_object('error', 'game-not-drafting');
   end if;
 
+  v_turn_kind      := v_current_turn ->> 'kind';
+  v_turn_player_id := v_current_turn ->> 'playerId';
+  v_turn_team      := v_current_turn ->> 'team';
+
+  -- 5. Authorisation: per-player vs collective team turn.
+  if v_turn_player_id is not null then
+    if v_turn_player_id <> v_player.id then
+      return jsonb_build_object('error', 'not-your-turn');
+    end if;
+  else
+    if v_turn_team is null or v_turn_team <> v_player.team then
+      return jsonb_build_object('error', 'not-your-team');
+    end if;
+  end if;
+
+  -- 6. Availability — common checks first.
   if exists (
     select 1 from public.picks
     where game_id = p_game_id and hero_id = p_hero_id
@@ -223,29 +360,97 @@ begin
     return jsonb_build_object('error', 'hero-unavailable');
   end if;
 
-  -- 6. Commit the pick.
-  v_pick_index := v_game.current_pick;
-  v_pick_id := gen_random_uuid()::text;
+  if v_game.bans ? p_hero_id then
+    return jsonb_build_object('error', 'hero-banned');
+  end if;
 
-  insert into public.picks (id, game_id, player_id, hero_id, pick_index, created_at)
-  values (v_pick_id, p_game_id, v_player.id, p_hero_id, v_pick_index, now());
-
-  -- 7. Advance the draft, completing if we've consumed every slot.
-  if v_pick_index + 1 >= v_order_len then
-    v_new_status := 'complete';
+  -- 7. Method-specific availability.
+  if v_game.method = 'single-draft' then
+    if v_player.hand is null or not (v_player.hand ? p_hero_id) then
+      return jsonb_build_object('error', 'not-in-hand');
+    end if;
   else
+    if not (v_game.hero_pool ? p_hero_id) then
+      return jsonb_build_object('error', 'hero-unavailable');
+    end if;
+  end if;
+
+  -- 8. Commit — pick or ban.
+  if v_turn_kind = 'ban' then
+    -- Append to games.bans; do NOT insert a pick row.
+    update public.games
+    set bans = coalesce(v_game.bans, '[]'::jsonb) || to_jsonb(p_hero_id),
+        current_pick = v_game.current_pick + 1
+    where id = p_game_id;
+  else
+    -- Determine owner: per-player turn → turn.playerId; collective → lowest
+    -- seat (ties by id) on turn.team with no existing pick row.
+    if v_turn_player_id is not null then
+      v_owner_id := v_turn_player_id;
+    else
+      select p.id into v_owner_id
+      from public.players p
+      where p.game_id = p_game_id
+        and p.team = v_turn_team
+        and not exists (
+          select 1 from public.picks pk
+          where pk.game_id = p_game_id and pk.player_id = p.id
+        )
+      order by p.seat asc, p.id asc
+      limit 1;
+
+      if v_owner_id is null then
+        -- Well-formed turn lists should never reach here; bail safely.
+        return jsonb_build_object('error', 'game-not-drafting');
+      end if;
+    end if;
+
+    v_pick_id := gen_random_uuid()::text;
+    insert into public.picks (id, game_id, player_id, hero_id, pick_index, created_at)
+    values (v_pick_id, p_game_id, v_owner_id, p_hero_id, v_game.current_pick, now());
+
+    update public.games
+    set current_pick = v_game.current_pick + 1
+    where id = p_game_id;
+  end if;
+
+  -- 9. Completion: complete iff no remaining turn at index >= new current_pick
+  --    has kind = 'pick'.
+  select exists (
+    select 1
+    from jsonb_array_elements(v_game.turns) with ordinality as t(turn, idx)
+    where (idx - 1) >= v_game.current_pick + 1
+      and (t.turn ->> 'kind') = 'pick'
+  ) into v_has_remaining;
+
+  if v_has_remaining then
     v_new_status := 'drafting';
+  else
+    v_new_status := 'complete';
   end if;
 
   update public.games
-  set current_pick = v_pick_index + 1,
-      status       = v_new_status
+  set status = v_new_status
   where id = p_game_id;
 
-  -- 8. Build the snapshot payload. Player rows are projected to the public
-  -- (token-free) shape so the snapshot never leaks auth material.
+  -- 10. Build the snapshot payload. The `game` projection is built EXPLICITLY
+  --     — we do not use `to_jsonb(g)` because that would leak the sensitive
+  --     `organiser_token` column into the shared payload. Player rows are
+  --     projected to the public (token-free, hand-free) shape.
   select jsonb_build_object(
-    'game', to_jsonb(g),
+    'game', jsonb_build_object(
+      'id',           g.id,
+      'status',       g.status,
+      'player_count', g.player_count,
+      'method',       g.method,
+      'hero_pool',    g.hero_pool,
+      'draft_order',  g.draft_order,
+      'current_pick', g.current_pick,
+      'turns',        g.turns,
+      'bans',         g.bans,
+      'start_team',   g.start_team,
+      'created_at',   g.created_at
+    ),
     'players', coalesce(
       (
         select jsonb_agg(
@@ -350,9 +555,24 @@ begin
     now()
   from jsonb_array_elements(p_assignments) as a;
 
-  -- 5. Build the same snapshot shape as `make_pick`, with token-free players.
+  -- 5. Build the same snapshot shape as `make_pick`. The `game` projection
+  --    is built EXPLICITLY (no `to_jsonb(g)`) so `organiser_token` cannot
+  --    leak into the shared payload. Player rows are projected to the public
+  --    (token-free, hand-free) shape.
   select jsonb_build_object(
-    'game', to_jsonb(g),
+    'game', jsonb_build_object(
+      'id',           g.id,
+      'status',       g.status,
+      'player_count', g.player_count,
+      'method',       g.method,
+      'hero_pool',    g.hero_pool,
+      'draft_order',  g.draft_order,
+      'current_pick', g.current_pick,
+      'turns',        g.turns,
+      'bans',         g.bans,
+      'start_team',   g.start_team,
+      'created_at',   g.created_at
+    ),
     'players', coalesce(
       (
         select jsonb_agg(
@@ -382,6 +602,61 @@ end;
 $$;
 
 grant execute on function public.seed_random_picks(text, text, jsonb) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- get_player_view RPC
+-- ---------------------------------------------------------------------------
+--
+-- Token-gated read of a single player's private slot, including their dealt
+-- hand (single-draft only; null otherwise). This is the ONLY place the
+-- `players.hand` column is ever returned to a client — the shared snapshot
+-- path projects players to id/game_id/name/team/seat exactly so other
+-- participants cannot read each other's hands.
+--
+-- Resolves `(p_game_id, p_player_token)` → players row. On match returns
+--   { "player": { id, name, team, seat }, "hand": <jsonb array | null> }
+-- On no match returns jsonb null (the client maps that to `null`).
+--
+-- Note: the function is SECURITY DEFINER so it can read `players.hand` even
+-- though the column GRANTs above forbid anon from selecting `hand` over a
+-- direct table read. The query is `where game_id = $1 and token = $2` and
+-- the returned `hand` is ALWAYS the resolved row's own hand — there is no
+-- code path that could return another player's hand.
+
+create or replace function public.get_player_view(
+  p_game_id       text,
+  p_player_token  text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_player public.players%rowtype;
+begin
+  select * into v_player
+  from public.players
+  where game_id = p_game_id and token = p_player_token;
+
+  if not found then
+    return 'null'::jsonb;
+  end if;
+
+  return jsonb_build_object(
+    'player', jsonb_build_object(
+      'id',      v_player.id,
+      'game_id', v_player.game_id,
+      'name',    v_player.name,
+      'team',    v_player.team,
+      'seat',    v_player.seat
+    ),
+    'hand', coalesce(v_player.hand, 'null'::jsonb)
+  );
+end;
+$$;
+
+grant execute on function public.get_player_view(text, text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Realtime
@@ -429,4 +704,3 @@ end $$;
 
 alter table public.games  replica identity full;
 alter table public.picks  replica identity full;
-

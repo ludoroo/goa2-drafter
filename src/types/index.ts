@@ -71,7 +71,24 @@ export interface Hero {
 
 export type TeamId = 'red' | 'blue'
 
-export type DraftMethod = 'snake' | 'random'
+export type DraftMethod =
+  | 'snake'
+  | 'random'
+  | 'all-pick'
+  | 'random-draft'
+  | 'single-draft'
+  | 'pick-and-ban'
+
+export type DraftTurnKind = 'pick' | 'ban'
+
+/** One step in the ordered draft sequence — either a pick or a ban. */
+export interface DraftTurn {
+  kind: DraftTurnKind
+  /** Player on the clock for player-pick methods; null for collective team turns (pick-and-ban). */
+  playerId: string | null
+  /** The team acting on this turn (always set — used for collective turns and UI highlighting). */
+  team: TeamId
+}
 
 export type GameStatus = 'setup' | 'drafting' | 'complete'
 
@@ -118,8 +135,14 @@ export interface Game {
   heroPool: string[]
   /** Ordered player ids — the snake pick sequence. */
   draftOrder: string[]
-  /** Index into `draftOrder` (snake only). */
+  /** Index into `draftOrder` (snake only); also indexes `turns` for new methods. */
   currentPick: number
+  /** Ordered turn list (pick or ban) for new draft methods; `currentPick` indexes into this. */
+  turns: DraftTurn[]
+  /** Hero ids banned so far (pick-and-ban only; empty otherwise). */
+  bans: string[]
+  /** The coin-flip team that acts first ("Team A"). */
+  startTeam: TeamId
   createdAt: number
 }
 
@@ -133,6 +156,16 @@ export interface GameSnapshot {
   game: Game
   players: PublicPlayer[]
   picks: Pick[]
+}
+
+/**
+ * The caller's private view of their own slot — returned only via a
+ * token-gated store method; never part of the shared GameSnapshot.
+ */
+export interface PlayerView {
+  player: PublicPlayer
+  /** The player's privately dealt hand of hero ids (Single Draft); null for methods without hands. */
+  hand: string[] | null
 }
 
 /** What an organiser submits to create a game. */
@@ -153,6 +186,9 @@ export type PickError =
   | 'game-not-drafting'
   | 'invalid-token'
   | 'game-not-found'
+  | 'not-in-hand'
+  | 'hero-banned'
+  | 'not-your-team'
 
 /** Discriminated result of attempting a pick. */
 export type PickResult = { ok: true; snapshot: GameSnapshot } | { ok: false; error: PickError }
@@ -170,6 +206,7 @@ export interface GameStore {
     input: CreateGameInput,
   ): Promise<{ game: Game; organiserToken: string; players: Player[] }>
   getSnapshot(gameId: string): Promise<GameSnapshot | null>
+  getPlayerView(gameId: string, token: string): Promise<PlayerView | null>
   makePick(gameId: string, playerToken: string, heroId: string): Promise<PickResult>
   /** Returns an unsubscribe function. */
   subscribe(gameId: string, cb: (snap: GameSnapshot) => void): () => void

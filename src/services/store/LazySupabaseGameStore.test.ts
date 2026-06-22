@@ -10,12 +10,14 @@ const mockSubscribe = vi.fn(() => mockSubscribeUnsubscribe)
 const mockGetSnapshot = vi.fn<(id: string) => Promise<GameSnapshot | null>>()
 const mockMakePick = vi.fn()
 const mockCreateGame = vi.fn()
+const mockGetPlayerView = vi.fn()
 
 class MockSupabaseGameStore implements GameStore {
   createGame = mockCreateGame
   getSnapshot = mockGetSnapshot
   makePick = mockMakePick
   subscribe = mockSubscribe
+  getPlayerView = mockGetPlayerView
 }
 
 vi.mock('./SupabaseGameStore', () => ({

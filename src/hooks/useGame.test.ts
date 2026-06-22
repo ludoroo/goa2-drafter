@@ -234,6 +234,7 @@ describe('useGame', () => {
       },
       makePick: (): Promise<PickResult> =>
         Promise.resolve({ ok: false, error: 'game-not-drafting' }),
+      getPlayerView: () => Promise.resolve(null),
       // No-op subscribe — never invokes the callback. Refresh is the ONLY
       // path that can mutate hook state in this test.
       subscribe: () => () => {},

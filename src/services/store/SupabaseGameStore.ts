@@ -1,6 +1,7 @@
 import type {
   CreateGameInput,
   DraftMethod,
+  DraftTurn,
   Game,
   GameSnapshot,
   GameStatus,
@@ -9,19 +10,36 @@ import type {
   PickError,
   PickResult,
   Player,
+  PlayerView,
   PublicPlayer,
   TeamId,
 } from '@/types'
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
-import { buildSnakeDraftOrder, randomAssignment } from '@/services/draft'
+import {
+  buildAllPickTurns,
+  buildAlternatingOrder,
+  buildPickBanTurns,
+  buildSnakeDraftOrder,
+  coinFlipTeam,
+  dealHands,
+  randomAssignment,
+  selectRandomDraftPool,
+} from '@/services/draft'
 import { generateGameCode, generateToken } from '@/utils/ids'
 
 // ---------------------------------------------------------------------------
 // Database row shapes (snake_case columns as stored in Postgres)
 // ---------------------------------------------------------------------------
 
-/** Row shape of the `games` table. */
-export interface GameRow {
+/**
+ * Token-free projection of the `games` table — every column NEEDED to build
+ * a `Game`, but explicitly NOT `organiser_token`. This is the only row shape
+ * that should ever be selected from the client over the anon key (see
+ * `getSnapshot` and `subscribe`), and the only shape returned in RPC payloads
+ * shared with all participants. The organiser token is held in memory by
+ * `createGame` and never round-trips back through a snapshot read.
+ */
+export interface SnapshotGameRow {
   id: string
   status: GameStatus
   player_count: number
@@ -29,13 +47,29 @@ export interface GameRow {
   hero_pool: string[]
   draft_order: string[]
   current_pick: number
-  organiser_token: string
+  /** Ordered turn list (pick or ban) — `current_pick` indexes into this. */
+  turns: DraftTurn[]
+  /** Hero ids banned so far. */
+  bans: string[]
+  /** Coin-flip team that acts first. */
+  start_team: TeamId
   created_at: string
 }
 
 /**
- * Row shape projected for snapshots — token is intentionally omitted so it
- * never escapes via `getSnapshot` or the `make_pick` RPC payload (see
+ * Full row shape of the `games` table — including the sensitive
+ * `organiser_token`. Used only on the create-game write path. The snapshot
+ * read path uses `SnapshotGameRow` so `organiser_token` is never selected
+ * over the anon key. Column-level GRANTs in schema.sql additionally prevent
+ * a malicious client from reading `organiser_token` directly.
+ */
+export interface GameRow extends SnapshotGameRow {
+  organiser_token: string
+}
+
+/**
+ * Row shape projected for snapshots — token AND hand are intentionally omitted
+ * so neither escapes via `getSnapshot` or the `make_pick` RPC payload (see
  * `PublicPlayer` in @/types). Use `PlayerRow` only on the create-game write
  * path where the organiser-side full record is required.
  */
@@ -47,9 +81,15 @@ export interface PublicPlayerRow {
   seat: number
 }
 
-/** Full row shape of the `players` table (includes the auth `token`). */
+/**
+ * Full row shape of the `players` table — includes the auth `token` AND the
+ * privately-dealt `hand` of hero ids (single-draft method; null otherwise).
+ * Neither field is ever projected into a snapshot. The hand is only ever
+ * returned through the token-gated `get_player_view` RPC.
+ */
 export interface PlayerRow extends PublicPlayerRow {
   token: string
+  hand: string[] | null
 }
 
 /** Row shape of the `picks` table. */
@@ -66,8 +106,16 @@ export interface PickRow {
 // Mappers (DB rows ⇄ domain types)
 // ---------------------------------------------------------------------------
 
-/** Map a DB games row → domain `Game`. */
-export const gameFromRow = (row: GameRow): Game => ({
+/**
+ * Map a DB games row → domain `Game`. Accepts the token-free
+ * `SnapshotGameRow` shape — the snapshot path explicitly never selects
+ * `organiser_token`, and the full `GameRow` extends `SnapshotGameRow` so
+ * write-path callers also work without a cast. Back-compat: legacy rows
+ * that pre-date the addition of `turns` / `bans` / `start_team` may have
+ * these as null in jsonb — default them to empty arrays and 'red' to mirror
+ * LocalGameStore's `normalizeGame`.
+ */
+export const gameFromRow = (row: SnapshotGameRow): Game => ({
   id: row.id,
   status: row.status,
   playerCount: row.player_count,
@@ -75,12 +123,16 @@ export const gameFromRow = (row: GameRow): Game => ({
   heroPool: [...row.hero_pool],
   draftOrder: [...row.draft_order],
   currentPick: row.current_pick,
+  turns: Array.isArray(row.turns) ? [...row.turns] : [],
+  bans: Array.isArray(row.bans) ? [...row.bans] : [],
+  startTeam: row.start_team === 'blue' ? 'blue' : 'red',
   createdAt: Date.parse(row.created_at),
 })
 
 /**
  * Map a token-free DB players row → `PublicPlayer`. Used by the snapshot
- * read path; tokens never leave the server through this projection.
+ * read path; neither tokens nor private hands leave the server through this
+ * projection.
  */
 export const publicPlayerFromRow = (row: PublicPlayerRow): PublicPlayer => ({
   id: row.id,
@@ -92,6 +144,8 @@ export const publicPlayerFromRow = (row: PublicPlayerRow): PublicPlayer => ({
 /**
  * Map a full DB players row → domain `Player` (with token). Used only on the
  * create-game return path so the organiser can build per-player magic links.
+ * The private `hand` field is intentionally dropped here — it is delivered
+ * to the owning player via `get_player_view` instead.
  */
 export const playerFromRow = (row: PlayerRow): Player => ({
   ...publicPlayerFromRow(row),
@@ -108,7 +162,7 @@ export const pickFromRow = (row: PickRow): Pick => ({
 })
 
 // ---------------------------------------------------------------------------
-// RPC payload shape returned by the `make_pick` SECURITY DEFINER function
+// RPC payload shapes
 // ---------------------------------------------------------------------------
 
 interface MakePickErrorPayload {
@@ -116,20 +170,30 @@ interface MakePickErrorPayload {
 }
 
 interface MakePickSuccessPayload {
-  game: GameRow
-  /** Token-free projection — see schema.sql `make_pick`. */
+  /** Token-free projection — see schema.sql `make_pick` (no organiser_token). */
+  game: SnapshotGameRow
+  /** Token-free + hand-free projection — see schema.sql `make_pick`. */
   players: PublicPlayerRow[]
   picks: PickRow[]
 }
 
 type MakePickPayload = MakePickErrorPayload | MakePickSuccessPayload
 
-const isPickError = (value: unknown): value is PickError =>
+/** Shape returned by `get_player_view` on success; `null` if token invalid. */
+interface PlayerViewPayload {
+  player: PublicPlayerRow
+  hand: string[] | null
+}
+
+export const isPickError = (value: unknown): value is PickError =>
   value === 'not-your-turn' ||
   value === 'hero-unavailable' ||
   value === 'game-not-drafting' ||
   value === 'invalid-token' ||
-  value === 'game-not-found'
+  value === 'game-not-found' ||
+  value === 'not-in-hand' ||
+  value === 'hero-banned' ||
+  value === 'not-your-team'
 
 // ---------------------------------------------------------------------------
 // SupabaseGameStore
@@ -152,20 +216,36 @@ const isPickError = (value: unknown): value is PickError =>
  * snapshot on any event. This is simpler than reconstructing partial state
  * from change payloads and keeps the source of truth in one query path.
  *
- * Token hygiene: snapshots returned by `getSnapshot` and the `make_pick` RPC
- * payload contain `PublicPlayer[]` only — never the per-player auth token.
- * Tokens are returned exactly once, to the organiser, from `createGame`.
+ * Secrets hygiene: three columns are sensitive — `games.organiser_token`,
+ * `players.token`, and `players.hand`. They are protected at three layers:
+ *   1. Column-level GRANTs in schema.sql revoke anon's broad SELECT and
+ *      re-grant ONLY the non-sensitive columns. A direct
+ *      `select organiser_token from games` over the anon key is refused by
+ *      Postgres before RLS runs.
+ *   2. App-side projections: `getSnapshot` explicitly selects each safe
+ *      column (never `*` on games), and `make_pick` / `seed_random_picks`
+ *      build their `game` jsonb with explicit `jsonb_build_object(...)` —
+ *      never `to_jsonb(g)` — so `organiser_token` cannot leak via an RPC
+ *      payload. Player projections list `id, game_id, name, team, seat`
+ *      only.
+ *   3. The organiser token is returned exactly once, to the organiser,
+ *      from `createGame`. Player tokens are returned only on that same
+ *      create call. Hands are only ever delivered to the owning player
+ *      through the token-gated `get_player_view` RPC, exposed here via
+ *      `getPlayerView`.
  *
  * Pick mutations: the `picks` table is locked down (no anon INSERT) — both
- * snake-method (`make_pick`) and random-method (`seed_random_picks`)
+ * the snake-method (`make_pick`) and random-method (`seed_random_picks`)
  * pick writes go through SECURITY DEFINER RPCs.
  *
  * NOTE on createGame atomicity: the supabase-js client cannot run a multi-table
- * transaction. We insert games → players, then call `seed_random_picks` for
- * the random method. If a later step fails the partial rows remain; for this
- * app's scale (a few co-located users creating a single game) this is
- * acceptable. A future hardening would fold the whole create flow into one
- * SECURITY DEFINER RPC.
+ * transaction. We compute the per-method draft state client-side (turns,
+ * bans, start team, trimmed pool, dealt hands), then insert games → players
+ * (with their hand jsonb for single-draft), and finally call
+ * `seed_random_picks` for the random method. If a later step fails the
+ * partial rows remain; for this app's scale (a few co-located users creating
+ * a single game) this is acceptable. A future hardening would fold the whole
+ * create flow into one SECURITY DEFINER RPC.
  */
 export class SupabaseGameStore implements GameStore {
   private readonly client: SupabaseClient
@@ -180,6 +260,7 @@ export class SupabaseGameStore implements GameStore {
     const id = generateGameCode()
     const organiserToken = generateToken()
     const now = new Date().toISOString()
+    const createdAtMs = Date.parse(now)
 
     const players: Player[] = input.players.map((p) => ({
       id: generateToken(),
@@ -189,11 +270,20 @@ export class SupabaseGameStore implements GameStore {
       token: generateToken(),
     }))
 
+    const startTeam = coinFlipTeam()
+
     let game: Game
-    let picks: Pick[]
+    let picks: Pick[] = []
+    let hands: Record<string, string[]> = {}
 
     if (input.method === 'snake') {
       const draftOrder = buildSnakeDraftOrder(players)
+      const byId = new Map(players.map((p) => [p.id, p]))
+      const turns: DraftTurn[] = draftOrder.map((pid) => ({
+        kind: 'pick',
+        playerId: pid,
+        team: byId.get(pid)!.team,
+      }))
       game = {
         id,
         status: 'drafting',
@@ -202,10 +292,12 @@ export class SupabaseGameStore implements GameStore {
         heroPool: [...input.heroPool],
         draftOrder,
         currentPick: 0,
-        createdAt: Date.parse(now),
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
       }
-      picks = []
-    } else {
+    } else if (input.method === 'random') {
       const ordered = [...players].sort((a, b) => a.seat - b.seat)
       const assignment = randomAssignment(
         ordered.map((p) => p.id),
@@ -216,7 +308,7 @@ export class SupabaseGameStore implements GameStore {
         playerId: p.id,
         heroId: assignment[p.id] as string,
         pickIndex: null,
-        createdAt: Date.parse(now),
+        createdAt: createdAtMs,
       }))
       game = {
         id,
@@ -226,7 +318,81 @@ export class SupabaseGameStore implements GameStore {
         heroPool: [...input.heroPool],
         draftOrder: [],
         currentPick: 0,
-        createdAt: Date.parse(now),
+        turns: [],
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
+      }
+    } else if (input.method === 'all-pick') {
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'all-pick',
+        heroPool: [...input.heroPool],
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
+      }
+    } else if (input.method === 'random-draft') {
+      const trimmedPool = selectRandomDraftPool(input.heroPool, input.playerCount)
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'random-draft',
+        heroPool: trimmedPool,
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
+      }
+    } else if (input.method === 'single-draft') {
+      const seatOrdered = [...players].sort((a, b) => a.seat - b.seat || a.id.localeCompare(b.id))
+      hands = dealHands(
+        seatOrdered.map((p) => p.id),
+        input.heroPool,
+        3,
+      )
+      const turns = buildAllPickTurns(players, startTeam)
+      const draftOrder = buildAlternatingOrder(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'single-draft',
+        heroPool: [...input.heroPool],
+        draftOrder,
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
+      }
+    } else {
+      // pick-and-ban
+      const turns = buildPickBanTurns(players, startTeam)
+      game = {
+        id,
+        status: 'drafting',
+        playerCount: input.playerCount,
+        method: 'pick-and-ban',
+        heroPool: [...input.heroPool],
+        draftOrder: [],
+        currentPick: 0,
+        turns,
+        bans: [],
+        startTeam,
+        createdAt: createdAtMs,
       }
     }
 
@@ -239,6 +405,9 @@ export class SupabaseGameStore implements GameStore {
       hero_pool: game.heroPool,
       draft_order: game.draftOrder,
       current_pick: game.currentPick,
+      turns: game.turns,
+      bans: game.bans,
+      start_team: game.startTeam,
       organiser_token: organiserToken,
       created_at: now,
     }
@@ -252,6 +421,8 @@ export class SupabaseGameStore implements GameStore {
       team: p.team,
       token: p.token,
       seat: p.seat,
+      // Only single-draft populates the private hand; null for everything else.
+      hand: input.method === 'single-draft' ? (hands[p.id] ?? null) : null,
     }))
     const { error: playersErr } = await this.client.from('players').insert(playerRows)
     if (playersErr) throw new Error(`createGame: failed to insert players: ${playersErr.message}`)
@@ -259,10 +430,8 @@ export class SupabaseGameStore implements GameStore {
     if (picks.length > 0) {
       // Random-method picks are inserted via a SECURITY DEFINER RPC rather
       // than a direct table insert. The `picks` table is locked down — anon
-      // INSERT is intentionally not granted (see schema.sql) — because the
-      // snake-draft path goes through `make_pick`. The `seed_random_picks`
-      // RPC checks the organiser token and that no picks already exist for
-      // the game, then writes the rows server-side.
+      // INSERT is intentionally not granted (see schema.sql). Other methods
+      // start with zero picks; picks are made later via `make_pick`.
       const assignments = picks.map((pk) => ({ player_id: pk.playerId, hero_id: pk.heroId }))
       const { error: seedErr } = await this.client.rpc('seed_random_picks', {
         p_game_id: game.id,
@@ -276,16 +445,24 @@ export class SupabaseGameStore implements GameStore {
   }
 
   async getSnapshot(gameId: string): Promise<GameSnapshot | null> {
+    // SECURITY: explicitly list every NON-sensitive column. We do NOT select
+    // `organiser_token` — even though `gameFromRow` would drop it, picking
+    // it up over the anon key leaks the organiser's auth material into the
+    // browser response. The column-level GRANTs in schema.sql additionally
+    // prevent direct anon SELECT of `organiser_token`.
     const { data: gameRow, error: gameErr } = await this.client
       .from('games')
-      .select('*')
+      .select(
+        'id, status, player_count, method, hero_pool, draft_order, current_pick, turns, bans, start_team, created_at',
+      )
       .eq('id', gameId)
-      .maybeSingle<GameRow>()
+      .maybeSingle<SnapshotGameRow>()
     if (gameErr) throw new Error(`getSnapshot: ${gameErr.message}`)
     if (!gameRow) return null
 
-    // Token-free projection — never expose `players.token` to the snapshot
-    // (which is shared among all participants).
+    // Token-free + hand-free projection — never expose `players.token` or
+    // `players.hand` to the shared snapshot. Column-level GRANTs in
+    // schema.sql additionally prevent direct anon SELECT of these columns.
     const { data: playerRows, error: playersErr } = await this.client
       .from('players')
       .select('id, game_id, name, team, seat')
@@ -302,6 +479,25 @@ export class SupabaseGameStore implements GameStore {
       game: gameFromRow(gameRow),
       players: ((playerRows as PublicPlayerRow[] | null) ?? []).map(publicPlayerFromRow),
       picks: ((pickRows as PickRow[] | null) ?? []).map(pickFromRow),
+    }
+  }
+
+  async getPlayerView(gameId: string, token: string): Promise<PlayerView | null> {
+    // The `players.hand` column is never selected directly from the client —
+    // it is delivered through a token-gated RPC so other players' hands stay
+    // private. The RPC returns jsonb `null` when the token doesn't match.
+    const { data, error } = await this.client.rpc('get_player_view', {
+      p_game_id: gameId,
+      p_player_token: token,
+    })
+    if (error) throw new Error(`getPlayerView rpc: ${error.message}`)
+
+    const payload = data as PlayerViewPayload | null
+    if (!payload || !payload.player) return null
+
+    return {
+      player: publicPlayerFromRow(payload.player),
+      hand: payload.hand ?? null,
     }
   }
 

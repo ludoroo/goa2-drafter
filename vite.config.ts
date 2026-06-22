@@ -17,6 +17,13 @@ const config: UserConfig & { test?: unknown } = {
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // Force the local (no-backend) store during tests so the suite never
+    // touches a real Supabase project (deterministic + no DB pollution),
+    // even when a developer has VITE_SUPABASE_* set in .env.local.
+    env: {
+      VITE_SUPABASE_URL: '',
+      VITE_SUPABASE_ANON_KEY: '',
+    },
   },
 }
 
