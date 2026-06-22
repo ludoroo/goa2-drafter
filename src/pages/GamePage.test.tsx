@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { render, screen, waitFor, cleanup, within } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, within, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { GamePage } from './GamePage'
@@ -282,18 +282,20 @@ describe('GamePage', () => {
   describe('single-draft', () => {
     it("selector shows only the player's 3-card hand, and picking from the hand succeeds", async () => {
       const created = await createGameWith('single-draft', LARGE_POOL)
-      const firstTurn = created.game.turns[0]!
-      const firstPicker = created.players.find((p: Player) => p.id === firstTurn.playerId)!
+      // Single Draft is simultaneous — `game.turns` is empty. Any player may
+      // pick at any time; choose an arbitrary one (Alice).
+      expect(created.game.turns).toHaveLength(0)
+      const somePlayer = created.players[0]!
 
       // Fetch the player's private hand via the store (the page does the same
       // through useGame + getPlayerView).
-      const view = await gameStore.getPlayerView(created.game.id, firstPicker.token)
+      const view = await gameStore.getPlayerView(created.game.id, somePlayer.token)
       expect(view).not.toBeNull()
       expect(view!.hand).not.toBeNull()
       const hand = view!.hand!
       expect(hand).toHaveLength(3)
 
-      renderAt(`/play/${created.game.id}?t=${firstPicker.token}`)
+      renderAt(`/play/${created.game.id}?t=${somePlayer.token}`)
 
       // Wait for the selector to mount with the hand.
       await waitFor(() => {
@@ -326,6 +328,46 @@ describe('GamePage', () => {
       await waitFor(() => {
         expect(screen.getByTestId('pick-progress')).toHaveTextContent(/pick 1 of 4/i)
       })
+    })
+
+    it('banner lists every player as a pending picker initially, and excludes a player after they pick', async () => {
+      const created = await createGameWith('single-draft', LARGE_POOL)
+
+      // Board view (no token) — banner is public and lists all pending pickers.
+      renderAt(`/play/${created.game.id}`)
+
+      const banner = await screen.findByTestId('on-the-clock-banner')
+      const pending = await within(banner).findByTestId('pending-pickers')
+      for (const p of created.players) {
+        expect(within(pending).getByText(p.name)).toBeInTheDocument()
+      }
+
+      // Drive a single pick directly through the store: pick the first card
+      // from one player's hand.
+      const picker = created.players[0]!
+      const view = await gameStore.getPlayerView(created.game.id, picker.token)
+      const heroId = view!.hand![0]!
+      let result: Awaited<ReturnType<typeof gameStore.makePick>>
+      await act(async () => {
+        result = await gameStore.makePick(created.game.id, picker.token, heroId)
+      })
+      expect(result!.ok).toBe(true)
+
+      // The board's subscription should propagate the new snapshot; the
+      // picker's name disappears from the pending list, the others remain.
+      await waitFor(() => {
+        const pendingAfter = within(screen.getByTestId('on-the-clock-banner')).getByTestId(
+          'pending-pickers',
+        )
+        expect(within(pendingAfter).queryByText(picker.name)).not.toBeInTheDocument()
+      })
+      const pendingAfter = within(screen.getByTestId('on-the-clock-banner')).getByTestId(
+        'pending-pickers',
+      )
+      for (const p of created.players) {
+        if (p.id === picker.id) continue
+        expect(within(pendingAfter).getByText(p.name)).toBeInTheDocument()
+      }
     })
 
     it('renders a friendly error (not a perpetual spinner) when the token is bogus', async () => {

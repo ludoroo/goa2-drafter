@@ -542,14 +542,18 @@ describe('LocalGameStore — single-draft', () => {
     clearStorage()
   })
 
-  it('deals disjoint 3-card hands and restricts picks to the caller’s hand', async () => {
+  it('deals disjoint 3-card hands with no turn sequence (simultaneous draft)', async () => {
     const store = new LocalGameStore()
     const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12']
     const { game, players } = await store.createGame(fourPlayerInputFor('single-draft', pool))
 
     expect(game.method).toBe('single-draft')
     expect(game.status).toBe('drafting')
-    expect(game.turns).toHaveLength(4)
+    // Single draft is simultaneous: no turn sequence, no draft order.
+    expect(game.turns).toEqual([])
+    expect(game.draftOrder).toEqual([])
+    expect(game.currentPick).toBe(0)
+    expect(game.bans).toEqual([])
     expect(game.heroPool).toEqual(pool)
 
     // Each player has a 3-card hand and hands are disjoint.
@@ -571,38 +575,84 @@ describe('LocalGameStore — single-draft', () => {
     for (const sp of snap.players) {
       expect(sp).not.toHaveProperty('hand')
     }
+  })
 
-    // Pick out of turn → not-your-turn.
-    const firstTurn = game.turns[0]!
-    const wrong = players.find((p) => p.id !== firstTurn.playerId)!
-    const wrongHero = hands[wrong.id]![0]!
-    const r0 = await store.makePick(game.id, wrong.token, wrongHero)
-    expect(r0.ok).toBe(false)
-    if (r0.ok) throw new Error('expected error')
-    expect(r0.error).toBe('not-your-turn')
+  it('allows simultaneous out-of-order picking by every player from their own hand', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12']
+    const { game, players } = await store.createGame(fourPlayerInputFor('single-draft', pool))
 
-    // Current picker picking a hero NOT in their hand → not-in-hand.
-    const currentPicker = players.find((p) => p.id === firstTurn.playerId)!
-    const otherPlayer = players.find((p) => p.id !== currentPicker.id)!
-    const notInHand = hands[otherPlayer.id]![0]!
-    expect(hands[currentPicker.id]).not.toContain(notInHand)
-    const r1 = await store.makePick(game.id, currentPicker.token, notInHand)
-    expect(r1.ok).toBe(false)
-    if (r1.ok) throw new Error('expected error')
-    expect(r1.error).toBe('not-in-hand')
-
-    // Full playthrough: each turn picks the first card in the current player's hand.
-    let s = (await store.getSnapshot(game.id)) as GameSnapshot
-    for (let i = 0; i < s.game.turns.length; i++) {
-      const turn = s.game.turns[s.game.currentPick]!
-      const picker = players.find((p) => p.id === turn.playerId)!
-      const r = await store.makePick(game.id, picker.token, hands[picker.id]![0]!)
-      expect(r.ok).toBe(true)
-      if (!r.ok) throw new Error('expected ok')
-      s = r.snapshot
+    // Capture each player's hand via their token-gated view.
+    const hands: Record<string, string[]> = {}
+    for (const p of players) {
+      const view = await store.getPlayerView(game.id, p.token)
+      hands[p.id] = view!.hand!
     }
-    expect(s.game.status).toBe('complete')
-    expect(s.picks).toHaveLength(4)
+
+    // Arbitrary out-of-order picking: player[2], player[0], player[3], player[1].
+    const order = [players[2]!, players[0]!, players[3]!, players[1]!]
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    for (let i = 0; i < order.length; i++) {
+      const picker = order[i]!
+      const hero = hands[picker.id]![0]!
+      const r = await store.makePick(game.id, picker.token, hero)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok for picker ${picker.name}, got ${r.error}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(4)
+    // Simultaneous draft has no pick order index.
+    for (const pk of snap.picks) {
+      expect(pk.pickIndex).toBeNull()
+    }
+    // Each player owns exactly one pick.
+    expect(new Set(snap.picks.map((pk) => pk.playerId))).toEqual(new Set(players.map((p) => p.id)))
+    // currentPick stays untouched (unused for single-draft).
+    expect(snap.game.currentPick).toBe(0)
+  })
+
+  it('rejects picking a hero not in the caller\u2019s hand with not-in-hand', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12']
+    const { game, players } = await store.createGame(fourPlayerInputFor('single-draft', pool))
+
+    const hands: Record<string, string[]> = {}
+    for (const p of players) {
+      const view = await store.getPlayerView(game.id, p.token)
+      hands[p.id] = view!.hand!
+    }
+
+    const caller = players[0]!
+    const other = players[1]!
+    const notInHand = hands[other.id]![0]!
+    expect(hands[caller.id]).not.toContain(notInHand)
+
+    const r = await store.makePick(game.id, caller.token, notInHand)
+    expect(r.ok).toBe(false)
+    if (r.ok) throw new Error('expected error')
+    expect(r.error).toBe('not-in-hand')
+  })
+
+  it('rejects a second pick by the same player with hero-unavailable', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12']
+    const { game, players } = await store.createGame(fourPlayerInputFor('single-draft', pool))
+
+    const caller = players[0]!
+    const view = await store.getPlayerView(game.id, caller.token)
+    const hand = view!.hand!
+
+    const r1 = await store.makePick(game.id, caller.token, hand[0]!)
+    expect(r1.ok).toBe(true)
+    if (!r1.ok) throw new Error('expected ok')
+
+    // Same caller attempts a second pick (a different hero from their hand).
+    const r2 = await store.makePick(game.id, caller.token, hand[1]!)
+    expect(r2.ok).toBe(false)
+    if (r2.ok) throw new Error('expected error')
+    expect(r2.error).toBe('hero-unavailable')
   })
 })
 

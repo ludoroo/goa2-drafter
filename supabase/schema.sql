@@ -247,19 +247,26 @@ grant  select (id, game_id, name, team, seat) on public.players to anon;
 -- game. Mirrors the generalised `LocalGameStore.makePick` logic:
 --
 --   * Resolve caller by (game_id, token) → invalid-token if no match.
---   * Look up `games.turns[current_pick]` (jsonb array, 0-based).
---   * Authorise: per-player turns require caller.id = turn.playerId;
---     collective turns (playerId is null) require caller.team = turn.team.
---   * Availability: hero must not be already picked, not banned, and
---       - for single-draft: must be in the caller's private hand;
---       - otherwise: must be in `games.hero_pool`.
---   * Commit:
---       - ban  → append hero to `games.bans`, no pick row inserted.
---       - pick → owner is `turn.playerId` if not null, else the player on
---         `turn.team` with the lowest seat (tie: id) who has no pick yet;
---         insert a pick row with `pick_index = current_pick`.
---   * Advance `current_pick`. Status flips to 'complete' iff there is no
---     remaining turn at index >= new current_pick with kind = 'pick'.
+--   * SINGLE DRAFT (simultaneous, no turn order): handled in its own branch
+--     before the turn lookup. Hero must be in the caller's private hand
+--     (else not-in-hand); the caller must have no existing pick AND the
+--     hero must not already be taken (else hero-unavailable). The pick is
+--     inserted with `pick_index = null` and owner = caller. `current_pick`
+--     is never advanced. Status flips to 'complete' once every player in
+--     the game has a pick. Returns the snapshot and exits.
+--   * OTHER METHODS (turn-based):
+--     - Look up `games.turns[current_pick]` (jsonb array, 0-based).
+--     - Authorise: per-player turns require caller.id = turn.playerId;
+--       collective turns (playerId is null) require caller.team = turn.team.
+--     - Availability: hero must not be already picked, not banned, and
+--       must be in `games.hero_pool`.
+--     - Commit:
+--         * ban  → append hero to `games.bans`, no pick row inserted.
+--         * pick → owner is `turn.playerId` if not null, else the player on
+--           `turn.team` with the lowest seat (tie: id) who has no pick yet;
+--           insert a pick row with `pick_index = current_pick`.
+--     - Advance `current_pick`. Status flips to 'complete' iff there is no
+--       remaining turn at index >= new current_pick with kind = 'pick'.
 --
 -- Returns jsonb. On failure: { "error": <code> } where <code> is one of the
 -- PickError union values in src/types/index.ts. On success:
@@ -325,6 +332,91 @@ begin
     return jsonb_build_object('error', 'invalid-token');
   end if;
 
+  -- 3a. Single draft is SIMULTANEOUS — no turn order, no current_pick advance.
+  --     Each player picks one hero from their private hand at any time. This
+  --     branch handles the entire flow and returns without falling through to
+  --     the turn-based logic below. Mirrors LocalGameStore.makePick single-
+  --     draft branch.
+  if v_game.method = 'single-draft' then
+    -- Hero must be in the caller's private hand.
+    if v_player.hand is null or not (v_player.hand ? p_hero_id) then
+      return jsonb_build_object('error', 'not-in-hand');
+    end if;
+
+    -- One pick per player: a second attempt is hero-unavailable to them.
+    if exists (
+      select 1 from public.picks
+      where game_id = p_game_id and player_id = v_player.id
+    ) then
+      return jsonb_build_object('error', 'hero-unavailable');
+    end if;
+
+    -- Hands are disjoint so a cross-player collision shouldn't occur, but
+    -- keep the global availability check for safety (also defended by the
+    -- unique (game_id, hero_id) constraint).
+    if exists (
+      select 1 from public.picks
+      where game_id = p_game_id and hero_id = p_hero_id
+    ) then
+      return jsonb_build_object('error', 'hero-unavailable');
+    end if;
+
+    v_pick_id := gen_random_uuid()::text;
+    insert into public.picks (id, game_id, player_id, hero_id, pick_index, created_at)
+    values (v_pick_id, p_game_id, v_player.id, p_hero_id, null, now());
+
+    -- Completion: complete once every player in the game has a pick. We do
+    -- NOT touch current_pick (it stays at 0 — single-draft has no turns).
+    if (
+      select count(distinct player_id) from public.picks where game_id = p_game_id
+    ) >= v_game.player_count then
+      update public.games set status = 'complete' where id = p_game_id;
+    end if;
+
+    -- Build the snapshot payload. Same explicit jsonb_build_object projection
+    -- as the turn-based path below — game WITHOUT organiser_token, players
+    -- token-free and hand-free, full picks rows.
+    select jsonb_build_object(
+      'game', jsonb_build_object(
+        'id',           g.id,
+        'status',       g.status,
+        'player_count', g.player_count,
+        'method',       g.method,
+        'hero_pool',    g.hero_pool,
+        'draft_order',  g.draft_order,
+        'current_pick', g.current_pick,
+        'turns',        g.turns,
+        'bans',         g.bans,
+        'start_team',   g.start_team,
+        'created_at',   g.created_at
+      ),
+      'players', coalesce(
+        (
+          select jsonb_agg(
+            jsonb_build_object(
+              'id', p.id,
+              'game_id', p.game_id,
+              'name', p.name,
+              'team', p.team,
+              'seat', p.seat
+            ) order by p.seat
+          )
+          from public.players p
+          where p.game_id = p_game_id
+        ),
+        '[]'::jsonb
+      ),
+      'picks', coalesce(
+        (select jsonb_agg(to_jsonb(pk) order by pk.pick_index nulls last, pk.created_at) from public.picks pk where pk.game_id = p_game_id),
+        '[]'::jsonb
+      )
+    ) into v_result
+    from public.games g
+    where g.id = p_game_id;
+
+    return v_result;
+  end if;
+
   -- 4. Current turn lookup. `turns` is a jsonb array of
   --    { kind, playerId, team } objects; `current_pick` is 0-based.
   v_turns_len := coalesce(jsonb_array_length(v_game.turns), 0);
@@ -364,15 +456,10 @@ begin
     return jsonb_build_object('error', 'hero-banned');
   end if;
 
-  -- 7. Method-specific availability.
-  if v_game.method = 'single-draft' then
-    if v_player.hand is null or not (v_player.hand ? p_hero_id) then
-      return jsonb_build_object('error', 'not-in-hand');
-    end if;
-  else
-    if not (v_game.hero_pool ? p_hero_id) then
-      return jsonb_build_object('error', 'hero-unavailable');
-    end if;
+  -- 7. Method-specific availability. Note: single-draft is handled in its
+  --    own branch above (step 3a) and never reaches here.
+  if not (v_game.hero_pool ? p_hero_id) then
+    return jsonb_build_object('error', 'hero-unavailable');
   end if;
 
   -- 8. Commit — pick or ban.

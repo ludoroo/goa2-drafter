@@ -132,6 +132,62 @@ interface TurnBannerProps {
  * `data-testid="current-pick-banner"` span continues to carry the active
  * label (player name for player turns, team label for collective turns).
  */
+interface SimultaneousBannerProps {
+  pendingPlayers: PublicPlayer[]
+}
+
+/**
+ * Banner for the simultaneous Single Draft mode — there's no turn order, so
+ * we surface WHO is still on the clock (everyone who hasn't picked yet).
+ * Team-colours each name chip for glanceability.
+ */
+function SimultaneousBanner({ pendingPlayers }: SimultaneousBannerProps): JSX.Element {
+  return (
+    <Card
+      data-testid="on-the-clock-banner"
+      className="flex flex-col items-center justify-center gap-3 border-2 border-amber-400/70 bg-amber-500/10 py-6 sm:flex-row sm:gap-4"
+    >
+      <span
+        data-testid="turn-action"
+        className="text-sm font-bold uppercase tracking-widest text-amber-200 sm:text-base"
+      >
+        Choosing
+      </span>
+      {pendingPlayers.length === 0 ? (
+        <span
+          data-testid="pending-pickers"
+          className="text-2xl font-extrabold uppercase tracking-wide text-amber-200 sm:text-3xl"
+        >
+          Choosing…
+        </span>
+      ) : (
+        <ul
+          data-testid="pending-pickers"
+          className="flex flex-wrap items-center justify-center gap-2"
+        >
+          {pendingPlayers.map((p) => (
+            <li
+              key={p.id}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-full border px-3 py-1 text-base font-bold uppercase tracking-wide sm:text-lg',
+                p.team === 'red'
+                  ? 'border-red-500/60 bg-red-500/10 text-red-200'
+                  : 'border-blue-500/60 bg-blue-500/10 text-blue-200',
+              )}
+            >
+              <span
+                className={cn('h-2.5 w-2.5 rounded-full', TEAM_DOT[p.team])}
+                aria-hidden="true"
+              />
+              {p.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  )
+}
+
 function TurnBanner({ currentTurn, picker, isComplete }: TurnBannerProps): JSX.Element {
   if (isComplete) {
     return (
@@ -343,6 +399,14 @@ export function GamePage(): JSX.Element {
   const perTeam = heroesPerTeam(game.playerCount)
   const picker = currentPickerId ? (players.find((p) => p.id === currentPickerId) ?? null) : null
 
+  // Simultaneous Single Draft: every player picks from their own hand whenever
+  // they want, so the "on the clock" surface lists EVERY player who hasn't
+  // picked yet (ordered by seat for a stable display).
+  const pickedPlayerIds = new Set(picks.map((p) => p.playerId))
+  const pendingPlayers: PublicPlayer[] = [...players]
+    .filter((p) => !pickedPlayerIds.has(p.id))
+    .sort((a, b) => a.seat - b.seat)
+
   // Selector source depends on method:
   //  - single-draft: the caller's PRIVATE hand only (token-gated; spectators
   //    and other players must never see it).
@@ -418,7 +482,11 @@ export function GamePage(): JSX.Element {
         </div>
       </header>
 
-      <TurnBanner currentTurn={currentTurn} picker={picker} isComplete={isComplete} />
+      {!isComplete && game.method === 'single-draft' ? (
+        <SimultaneousBanner pendingPlayers={pendingPlayers} />
+      ) : (
+        <TurnBanner currentTurn={currentTurn} picker={picker} isComplete={isComplete} />
+      )}
 
       {flash ? (
         <div

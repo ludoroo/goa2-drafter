@@ -363,17 +363,19 @@ export class SupabaseGameStore implements GameStore {
         input.heroPool,
         3,
       )
-      const turns = buildAllPickTurns(players, startTeam)
-      const draftOrder = buildAlternatingOrder(players, startTeam)
+      // Single draft is SIMULTANEOUS: each player picks one hero from their
+      // private hand at any time, in any order. There is no shared turn
+      // sequence and no draft order — `make_pick` handles it in a dedicated
+      // branch that bypasses turn authorisation. Mirrors LocalGameStore.
       game = {
         id,
         status: 'drafting',
         playerCount: input.playerCount,
         method: 'single-draft',
         heroPool: [...input.heroPool],
-        draftOrder,
+        draftOrder: [],
         currentPick: 0,
-        turns,
+        turns: [],
         bans: [],
         startTeam,
         createdAt: createdAtMs,

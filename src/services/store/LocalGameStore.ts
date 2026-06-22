@@ -273,17 +273,19 @@ export class LocalGameStore implements GameStore {
         input.heroPool,
         3,
       )
-      const turns = buildAllPickTurns(players, startTeam)
-      const draftOrder = buildAlternatingOrder(players, startTeam)
+      // Single draft is SIMULTANEOUS: each player picks one hero from their
+      // private hand at any time, in any order. There is no shared turn
+      // sequence and no draft order — `makePick` handles it in a dedicated
+      // branch that bypasses turn authorisation.
       game = {
         id,
         status: 'drafting',
         playerCount: input.playerCount,
         method: 'single-draft',
         heroPool: [...input.heroPool],
-        draftOrder,
+        draftOrder: [],
         currentPick: 0,
-        turns,
+        turns: [],
         bans: [],
         startTeam,
         createdAt: now,
@@ -349,6 +351,55 @@ export class LocalGameStore implements GameStore {
       const caller = playerId ? snap.players.find((p) => p.id === playerId) : undefined
       if (!caller) return Promise.resolve({ ok: false, error: 'invalid-token' })
 
+      // Single draft is simultaneous: no turn order. Each player may pick one
+      // hero from their private hand at any time. We handle it entirely here
+      // and never consult game.turns / game.currentPick.
+      if (snap.game.method === 'single-draft') {
+        const hand = record.hands[caller.id] ?? []
+        if (!hand.includes(heroId)) {
+          return Promise.resolve({ ok: false, error: 'not-in-hand' })
+        }
+        // Bans don't apply to single draft, but the guard is a cheap safety net.
+        if (snap.game.bans.includes(heroId)) {
+          return Promise.resolve({ ok: false, error: 'hero-banned' })
+        }
+        // One pick per player; a second attempt (even with a different hero
+        // from their hand) is rejected as no-longer-available to them.
+        const callerAlreadyPicked = snap.picks.some((pk) => pk.playerId === caller.id)
+        if (callerAlreadyPicked) {
+          return Promise.resolve({ ok: false, error: 'hero-unavailable' })
+        }
+        // Hands are disjoint so a cross-player collision shouldn't occur, but
+        // keep the global availability check for safety.
+        if (snap.picks.some((pk) => pk.heroId === heroId)) {
+          return Promise.resolve({ ok: false, error: 'hero-unavailable' })
+        }
+
+        const pick: Pick = {
+          id: generateToken(),
+          playerId: caller.id,
+          heroId,
+          pickIndex: null,
+          createdAt: Date.now(),
+        }
+        const nextPicks = [...snap.picks, pick]
+        // Complete once every player has exactly one pick.
+        const nextStatus: Game['status'] =
+          nextPicks.length >= snap.players.length ? 'complete' : 'drafting'
+        const nextSnap: GameSnapshot = {
+          game: { ...snap.game, status: nextStatus },
+          players: snap.players,
+          picks: nextPicks,
+        }
+
+        if (this.casWrite(gameId, record.rev, nextSnap, record.tokens, record.hands)) {
+          this.notify(gameId, nextSnap)
+          return Promise.resolve({ ok: true, snapshot: nextSnap })
+        }
+        // CAS lost — loop to retry against fresh state.
+        continue
+      }
+
       const currentTurn = snap.game.turns[snap.game.currentPick]
       if (!currentTurn) {
         return Promise.resolve({ ok: false, error: 'game-not-drafting' })
@@ -374,15 +425,8 @@ export class LocalGameStore implements GameStore {
         return Promise.resolve({ ok: false, error: 'hero-banned' })
       }
 
-      if (snap.game.method === 'single-draft') {
-        const hand = record.hands[caller.id] ?? []
-        if (!hand.includes(heroId)) {
-          return Promise.resolve({ ok: false, error: 'not-in-hand' })
-        }
-      } else {
-        if (!snap.game.heroPool.includes(heroId)) {
-          return Promise.resolve({ ok: false, error: 'hero-unavailable' })
-        }
+      if (!snap.game.heroPool.includes(heroId)) {
+        return Promise.resolve({ ok: false, error: 'hero-unavailable' })
       }
 
       // Commit.
