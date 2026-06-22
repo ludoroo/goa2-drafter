@@ -1,16 +1,28 @@
 # GoA2 Drafter
 
-A web app for setting up a game of [**Guards of Atlantis II**](https://www.woodenleopard.com/guards-of-atlantis): pick your players, form two teams, curate the available hero pool, then draft heroes via **snake** or **random** assignment. Fully **async / multi-device** when Supabase is configured — every player picks on their own phone or laptop and watches the shared board update live — and a built-in **single-device localStorage** mode lets you run a pass-the-device draft with zero setup.
+A web app for setting up a game of [**Guards of Atlantis II**](https://www.woodenleopard.com/guards-of-atlantis): pick your players, form two teams, curate the available hero pool, then assign heroes via any of six selection methods — from a one-click random deal to a full rulebook pick-and-ban. Fully **async / multi-device** when Supabase is configured — every player picks on their own phone or laptop and watches the shared board update live — and a built-in **single-device localStorage** mode lets you run a pass-the-device draft with zero setup.
 
 ## Features
 
 - **Teams** — randomize into two even teams, or assign players manually.
 - **Hero pool** — pick whole hero packs (Core, Defiant, Devoted, Renowned, Arcane, Wayward) or toggle individual heroes.
-- **Snake draft** — standard `A, B, B, A, A, B, B, A …` order with enforced turn-taking; only the active player can pick.
-- **Random** — shuffle the curated pool and deal everyone a hero in one click.
+- **Six hero-selection methods** (see below) — covering everything from "just deal me a hero" to the full rulebook pick-and-ban.
 - **Async multiplayer** — per-player magic links; rosters and picks update live on every device, plus a TV-friendly board view.
 - **Single-device fallback** — works offline out of the box via localStorage; great for in-person play.
 - **Hero selection UI** — slanted "domino" strips that expand to a full hero card, with filters by complexity (★1–4), role, pack, search, and stat sort.
+
+### Hero-selection methods
+
+| Method | One-liner |
+| ------ | --------- |
+| **All Random** | Everyone is dealt a random hero from the curated pool in one shot. |
+| **Snake** | Turn-based `A, B, B, A, A, B, B, A …` draft (house variant). |
+| **All Pick** | Teams alternate one pick at a time from the full pool until everyone has a hero. |
+| **Random Draft** | A shared pool of `players + 2` random heroes is revealed; teams alternate picks from it. |
+| **Single Draft** | Each player is privately dealt a hand of 3 heroes (via their magic link) and picks one. |
+| **Pick & Ban** | Teams alternately **ban** and **pick** in the rulebook order (`Ban A,B · Pick A,B · Ban B,A · Pick B,A · …`). |
+
+The starting team ("Team A") is chosen by a **coin flip** at game creation. In **Single Draft**, each player's hand is private — it's never part of the shared snapshot and is only delivered to the owner via their magic-link token.
 
 ## Tech stack
 

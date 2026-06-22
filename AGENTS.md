@@ -8,7 +8,7 @@ Guidance for AI coding agents working on this codebase. Keep edits faithful to t
 
 - Forming two even teams from a roster of 4/6/8/10 players (random or manual).
 - Curating the available hero pool by pack and/or individual hero.
-- Drafting heroes via **snake** (turn-enforced, async) or **random** (one-shot).
+- Drafting heroes via six selection methods: **snake**, **all-random**, **all-pick**, **random-draft**, **single-draft**, and **pick-and-ban** (turn-enforced + async where applicable).
 - Serving each player a private screen via an unguessable magic-link token, plus a shared read-only board.
 
 The app is deployed as static assets to **GitHub Pages** under base path `/goa2-drafter/`. There is no server we control; **Supabase** (Postgres + Realtime) is the optional backend for shared mutable state. When Supabase env vars are absent, the app falls back to a fully working **localStorage** store for single-device play.
@@ -160,9 +160,15 @@ When adding a new feature that touches game state, **add the method to the `Game
 
 ## Draft logic
 
-All snake-order construction and random-assignment logic is **pure** and lives in `src/services/draft.ts`, with unit tests in `src/services/draft.test.ts`. **Do not** put draft rules inside React components or stores — keep them in `draft.ts` so they can be unit-tested without a backend.
+All hero-selection logic is **pure** and lives in `src/services/draft.ts`, with unit tests in `src/services/draft.test.ts`. **Do not** put draft rules inside React components or stores — keep them in `draft.ts` so they can be unit-tested without a backend.
 
-Snake order is `A, B, B, A, A, B, B, A …` (standard snake). Within each team the seat order is shuffled once at setup. The current pick is `draft_order[current_pick]`; the `make_pick` RPC enforces this server-side.
+**Six selection methods** are supported: `random` (All Random, one-shot), `snake` (house A-B-B-A), `all-pick`, `random-draft` (shared pool of `players+2`), `single-draft` (private hand of 3 per player), and `pick-and-ban` (rulebook ban/pick order). The starting team ("Team A") is a **coin flip** (`coinFlipTeam`) at game creation.
+
+**Generalized turn model.** Turn-based methods are an ordered `Game.turns: DraftTurn[]` where each `DraftTurn` is `{ kind: 'pick' | 'ban', playerId: string | null, team: TeamId }` — `playerId` is set for player-pick turns, `null` for collective team turns (pick-and-ban). `Game.currentPick` indexes into `turns`. `Game.bans` holds banned hero ids. The pure builders are `buildSnakeDraftOrder`, `buildAlternatingOrder`, `buildAllPickTurns`, `buildPickBanTurns`, plus `selectRandomDraftPool` and `dealHands`. Pool minimums are method-aware via `minimumPoolSize(count, method)`.
+
+**Private hands (Single Draft).** A player's dealt hand is **never** in the shared `GameSnapshot`. It's stored alongside tokens (local) / in `players.hand` (Supabase, column-GRANT protected) and exposed only through the token-gated `GameStore.getPlayerView` (`get_player_view` RPC).
+
+`make_pick` is now **turn-aware**: it reads `turns[currentPick]`, authorizes per-player (`not-your-turn`) or per-team (`not-your-team`), enforces hand membership (`not-in-hand`) for single-draft and ban state (`hero-banned`), commits a ban (append to `bans`) or a pick (claimed by the acting player, or for collective pick-and-ban the lowest-seat player on the team without a hero yet), and completes when no `pick` turns remain.
 
 ## Hero data
 
@@ -227,10 +233,11 @@ Change **only** `src/services/draft.ts` and update `src/services/draft.test.ts`.
 
 The deployed app is a static SPA. The Supabase **anon** key is in the bundle by design — security comes from tokens + RLS, not from hiding the key. When making changes:
 
-- **Never expose `players.token`** to other participants. The shared snapshot path in `SupabaseGameStore.getSnapshot()` and the RPC payloads in `schema.sql` already project player rows to a token-free shape; preserve that.
+- **Never expose `players.token`, `players.hand`, or `games.organiser_token`** to other participants. Three layers protect them: (1) **column-level GRANTs** — anon has `SELECT` only on the non-sensitive columns of `games`/`players`, so a raw `select token/hand/organiser_token` over the anon key is refused by Postgres; (2) `SupabaseGameStore.getSnapshot()` selects explicit safe columns; (3) RPC payloads build the snapshot with explicit `jsonb_build_object(...)` (never `to_jsonb(g)`). Single-draft hands are returned only by the token-gated `get_player_view` RPC (`GameStore.getPlayerView`).
 - All pick mutations go through **`make_pick`** and **`seed_random_picks`** (both `SECURITY DEFINER`). Anon does **not** have `INSERT` on `picks`, and no anon `UPDATE`/`DELETE` exists on any table. Don't add direct table-level write policies — funnel new mutations through new RPCs.
 - Tokens (organiser + player) are 128-bit, generated client-side via `src/utils/ids.ts`. Use the existing helper rather than rolling your own.
 - Defense-in-depth lives in the database too: `picks` has unique `(game_id, hero_id)` and `(game_id, player_id)` constraints, so even a regression in app code can't double-pick a hero.
+- **Tests force the local store** via `test.env` in `vite.config.ts` (empties the `VITE_SUPABASE_*` vars) so the suite never touches a real Supabase project.
 
 If a future change requires a stricter model (e.g. auth-backed identities, per-row token policies, full create flow inside a `SECURITY DEFINER` RPC), update both `schema.sql` and this section.
 

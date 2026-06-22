@@ -5,6 +5,12 @@ form two teams, curate the available hero pool, then assign heroes via **snake
 draft** or **random** assignment — fully **async** so each player picks on their
 own device and sees the live state of both teams.
 
+> **Update:** the four additional rulebook hero-selection methods — **all-pick**,
+> **random-draft**, **single-draft**, and **pick-and-ban** — were implemented
+> after this original plan (snake + random shipped first). See
+> [`PLAN-draft-methods.md`](./PLAN-draft-methods.md) for that design (generalized
+> `Game.turns` model, coin-flip starting team, private Single-Draft hands).
+
 ---
 
 ## 1. Goals (from brief)
