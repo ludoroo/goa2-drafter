@@ -1,31 +1,17 @@
 /**
- * SetupPage — supports TWO routes (both must be registered in the app router):
+ * SetupPage — the new-game wizard at `/setup`.
  *
- *   1. `/setup`                            → fresh wizard for a new game
- *   2. `/setup/:gameId?t=<organiserToken>` → organiser dashboard for an
- *                                            already-created game (re-renders
- *                                            shareable links without re-running
- *                                            the wizard)
- *
- * Mode is selected by the presence of the `:gameId` URL param. The dashboard
- * branch loads the public snapshot via `gameStore.getSnapshot` and shows the
- * board link + organiser link + player roster. Per-player magic-link tokens
- * are intentionally NOT reconstructed — they are private auth material that
- * `getSnapshot` never returns. Players who lost their link must ask the
- * organiser, who saw the full link list at creation time.
+ * A five-step flow (players → teams → method → hero pool → generate). On the
+ * final step it calls `gameStore.createGame` and shows the shareable links:
+ * the board link (`/play/:gameId`, also the organiser's way back to the game)
+ * and one per-player magic link (`/play/:gameId?t=<token>`). The per-player
+ * tokens are shown once here and are never recoverable later (they are private
+ * auth material the shared snapshot never returns), so a player who loses their
+ * link needs the game regenerated.
  */
 import type { JSX } from 'react'
 import { useEffect, useMemo, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
-import type {
-  CreateGameInput,
-  DraftMethod,
-  Game,
-  GameSnapshot,
-  Player,
-  PublicPlayer,
-  TeamId,
-} from '@/types'
+import type { CreateGameInput, DraftMethod, Game, Player, TeamId } from '@/types'
 import { HERO_PACKS } from '@/data/packs'
 import { HEROES } from '@/data/heroes'
 import { minimumPoolSize } from '@/services/draft'
@@ -537,7 +523,7 @@ interface WizardSuccessProps {
 }
 
 function WizardSuccess({ created }: WizardSuccessProps): JSX.Element {
-  const { game, organiserToken, players } = created
+  const { game, players } = created
   return (
     <Card>
       <h2 className="mb-2 text-xl font-semibold text-teal-300">Game created!</h2>
@@ -547,6 +533,10 @@ function WizardSuccess({ created }: WizardSuccessProps): JSX.Element {
       </p>
 
       <h3 className="mt-4 mb-2 font-semibold text-slate-100">Board</h3>
+      <p className="mb-2 text-xs text-slate-400">
+        Open this anywhere to watch the draft live (great for a TV). Keep it handy &mdash; it&apos;s
+        also your way back to this game.
+      </p>
       <ShareLinkRow label="Shared board view" path={`/play/${game.id}`} />
 
       <h3 className="mt-6 mb-2 font-semibold text-slate-100">
@@ -561,127 +551,6 @@ function WizardSuccess({ created }: WizardSuccessProps): JSX.Element {
           />
         ))}
       </div>
-
-      <h3 className="mt-6 mb-2 font-semibold text-slate-100">Organiser</h3>
-      <ShareLinkRow
-        label="Organiser link (keep private)"
-        path={`/setup/${game.id}?t=${organiserToken}`}
-      />
-    </Card>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Organiser dashboard — for `/setup/:gameId`. Re-renders share links from
-// the public snapshot. Per-player tokens are NOT available from a snapshot
-// (they're private), so we show the player roster and a note explaining
-// where the magic links came from.
-// ---------------------------------------------------------------------------
-
-type DashboardLoad =
-  | { status: 'loading' }
-  | { status: 'not-found' }
-  | { status: 'ready'; snapshot: GameSnapshot }
-
-interface OrganiserDashboardProps {
-  gameId: string
-  organiserToken: string | null
-}
-
-function OrganiserDashboard({ gameId, organiserToken }: OrganiserDashboardProps): JSX.Element {
-  // The parent passes `key={gameId}` so this component remounts when gameId
-  // changes — that means initial state ('loading') is the correct value for
-  // every gameId without a manual reset inside the effect.
-  const [load, setLoad] = useState<DashboardLoad>({ status: 'loading' })
-
-  useEffect(() => {
-    let cancelled = false
-    void gameStore
-      .getSnapshot(gameId)
-      .then((snap) => {
-        if (cancelled) return
-        if (!snap) setLoad({ status: 'not-found' })
-        else setLoad({ status: 'ready', snapshot: snap })
-      })
-      .catch(() => {
-        if (!cancelled) setLoad({ status: 'not-found' })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [gameId])
-
-  if (load.status === 'loading') {
-    return (
-      <Card>
-        <p className="text-sm text-slate-300">Loading game…</p>
-      </Card>
-    )
-  }
-
-  if (load.status === 'not-found') {
-    return (
-      <Card>
-        <h2 className="mb-2 text-xl font-semibold text-amber-300">Game not found</h2>
-        <p className="text-sm text-slate-300">
-          We couldn&apos;t find a game with code{' '}
-          <span className="font-mono text-amber-200">{gameId}</span>. Double-check the link, or
-          start a new game from the home page.
-        </p>
-      </Card>
-    )
-  }
-
-  const { snapshot } = load
-  const orderedPlayers: PublicPlayer[] = [...snapshot.players].sort((a, b) => a.seat - b.seat)
-
-  return (
-    <Card>
-      <h2 className="mb-2 text-xl font-semibold text-teal-300">Organiser dashboard</h2>
-      <p className="mb-4 text-sm text-slate-400">
-        Game code <span className="font-mono text-amber-300">{snapshot.game.id}</span> &mdash;
-        method <span className="text-slate-200">{snapshot.game.method}</span>, status{' '}
-        <span className="text-slate-200">{snapshot.game.status}</span>.
-      </p>
-
-      <h3 className="mt-4 mb-2 font-semibold text-slate-100">Board</h3>
-      <ShareLinkRow label="Shared board view" path={`/play/${snapshot.game.id}`} />
-
-      <h3 className="mt-6 mb-2 font-semibold text-slate-100">Organiser</h3>
-      {organiserToken ? (
-        <ShareLinkRow
-          label="Organiser link (keep private)"
-          path={`/setup/${snapshot.game.id}?t=${organiserToken}`}
-        />
-      ) : (
-        <p className="text-sm text-amber-300">
-          Organiser token missing from this URL. The board link above still works.
-        </p>
-      )}
-
-      <h3 className="mt-6 mb-2 font-semibold text-slate-100">Players</h3>
-      <p className="mb-2 text-xs text-slate-400">
-        Per-player magic links were shown once at creation time and aren&apos;t recoverable here for
-        security reasons. If a player lost their link, regenerate the game.
-      </p>
-      <ul className="space-y-1">
-        {orderedPlayers.map((p) => (
-          <li
-            key={p.id}
-            className="flex items-center justify-between rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm"
-          >
-            <span className="font-medium text-slate-100">{p.name}</span>
-            <span
-              className={cn(
-                'rounded-full px-2 py-0.5 text-xs font-semibold',
-                p.team === 'red' ? 'bg-red-900/50 text-red-200' : 'bg-blue-900/50 text-blue-200',
-              )}
-            >
-              {p.team}
-            </span>
-          </li>
-        ))}
-      </ul>
     </Card>
   )
 }
@@ -894,19 +763,10 @@ function SetupWizard(): JSX.Element {
 // ---------------------------------------------------------------------------
 
 export function SetupPage(): JSX.Element {
-  const params = useParams<{ gameId?: string }>()
-  const [searchParams] = useSearchParams()
-  const gameId = params.gameId
-  const organiserToken = searchParams.get('t')
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-3xl px-6 py-10">
-        {gameId ? (
-          <OrganiserDashboard key={gameId} gameId={gameId} organiserToken={organiserToken} />
-        ) : (
-          <SetupWizard />
-        )}
+        <SetupWizard />
       </div>
     </div>
   )

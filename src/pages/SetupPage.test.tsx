@@ -4,18 +4,15 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { SetupPage } from './SetupPage'
 import { HERO_PACKS } from '@/data/packs'
-import { gameStore } from '@/services/store'
 
 /**
- * Render SetupPage at a given URL with both wizard + dashboard routes
- * registered, mirroring the production app router.
+ * Render SetupPage (the new-game wizard) at `/setup`.
  */
 function renderSetupAt(initialPath: string): void {
   render(
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
-        <Route path="/setup/:gameId" element={<SetupPage />} />
       </Routes>
     </MemoryRouter>,
   )
@@ -243,62 +240,11 @@ describe('SetupPage — Step 5 (Generate)', () => {
     const playLinks = screen.getAllByText((content) => /\/play\/[^\s?]+\?t=/i.test(content))
     expect(playLinks.length).toBe(4)
 
-    // Organiser link present.
-    expect(screen.getByText(/organiser link/i)).toBeInTheDocument()
-    expect(screen.getByText((content) => /\/setup\/[^\s?]+\?t=/i.test(content))).toBeInTheDocument()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Dashboard mode — `/setup/:gameId?t=<organiserToken>`
-// ---------------------------------------------------------------------------
-
-describe('SetupPage — organiser dashboard', () => {
-  it('renders the board link and player roster for an existing game', async () => {
-    // Seed a game directly via the store so we have a real gameId + token.
-    const { game, organiserToken, players } = await gameStore.createGame({
-      playerCount: 4,
-      method: 'snake',
-      heroPool: HERO_PACKS[0]!.heroIds.slice(0, 4),
-      players: [
-        { name: 'Ada', team: 'red', seat: 0 },
-        { name: 'Bea', team: 'red', seat: 1 },
-        { name: 'Cal', team: 'blue', seat: 2 },
-        { name: 'Dax', team: 'blue', seat: 3 },
-      ],
-    })
-
-    renderSetupAt(`/setup/${game.id}?t=${organiserToken}`)
-
-    // The dashboard heading should appear after the snapshot loads.
-    expect(await screen.findByText(/organiser dashboard/i)).toBeInTheDocument()
-
-    // Not-found message must NOT appear.
-    expect(screen.queryByText(/game not found/i)).not.toBeInTheDocument()
-
-    // Board link is present.
-    expect(screen.getByText(/shared board view/i)).toBeInTheDocument()
-    expect(screen.getByText((content) => content.includes(`/play/${game.id}`))).toBeInTheDocument()
-
-    // Organiser link is present (token came from the URL).
+    // No organiser link is shown — it was removed (the board link is the way back).
+    expect(screen.queryByText(/organiser link/i)).not.toBeInTheDocument()
     expect(
-      screen.getByText((content) => content.includes(`/setup/${game.id}?t=${organiserToken}`)),
-    ).toBeInTheDocument()
-
-    // Each player name is listed.
-    for (const p of players) {
-      expect(screen.getByText(p.name)).toBeInTheDocument()
-    }
-
-    // Note about per-player links being unrecoverable.
-    expect(screen.getByText(/per-player magic links/i)).toBeInTheDocument()
-  })
-
-  it('shows a not-found message when the gameId is unknown', async () => {
-    renderSetupAt('/setup/does-not-exist?t=whatever')
-    expect(await screen.findByText(/game not found/i)).toBeInTheDocument()
-    // Wizard must not be rendered.
-    expect(screen.queryByRole('heading', { name: /set up a new game/i })).not.toBeInTheDocument()
+      screen.queryByText((content) => /\/setup\/[^\s?]+\?t=/i.test(content)),
+    ).not.toBeInTheDocument()
   })
 })
 
@@ -392,35 +338,5 @@ describe('SetupPage — share-link copy handler', () => {
 
     expect(writeText).toHaveBeenCalledTimes(1)
     expect(await screen.findByText(/copy failed/i)).toBeInTheDocument()
-  })
-
-  it('disables Copy when navigator.clipboard is unavailable', async () => {
-    // Seed a real game so the dashboard view has share rows to render.
-    const { game, organiserToken } = await gameStore.createGame({
-      playerCount: 4,
-      method: 'snake',
-      heroPool: HERO_PACKS[0]!.heroIds.slice(0, 4),
-      players: [
-        { name: 'Ada', team: 'red', seat: 0 },
-        { name: 'Bea', team: 'red', seat: 1 },
-        { name: 'Cal', team: 'blue', seat: 2 },
-        { name: 'Dax', team: 'blue', seat: 3 },
-      ],
-    })
-
-    // Remove navigator.clipboard *before* rendering. Because we never call
-    // `userEvent.setup()` in this test, no clipboard stub is installed.
-    setClipboard(undefined)
-
-    renderSetupAt(`/setup/${game.id}?t=${organiserToken}`)
-
-    // Wait for the dashboard to finish loading the snapshot.
-    expect(await screen.findByText(/organiser dashboard/i)).toBeInTheDocument()
-
-    const copyButtons = screen.getAllByRole('button', { name: /copy .* link/i })
-    expect(copyButtons.length).toBeGreaterThan(0)
-    for (const btn of copyButtons) {
-      expect(btn).toBeDisabled()
-    }
   })
 })

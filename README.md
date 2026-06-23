@@ -105,7 +105,7 @@ See the comments at the top of [`supabase/schema.sql`](./supabase/schema.sql) fo
 | Route                            | Purpose                                                                       |
 | -------------------------------- | ----------------------------------------------------------------------------- |
 | `/`                              | Home — create a new game.                                                     |
-| `/setup/:gameId?t=<token>`       | Organiser's setup wizard (players → teams → pool → method → generate links). |
+| `/setup`                         | Organiser's setup wizard (players → teams → method → pool → generate links).  |
 | `/play/:gameId?t=<playerToken>`  | A player's draft screen — board + hero selector to pick on their turn.        |
 | `/play/:gameId`                  | Same page WITHOUT a token: a shared, read-only live board (great for a TV).    |
 | `/board/:gameId`                 | Legacy alias — redirects to `/play/:gameId`.                                  |

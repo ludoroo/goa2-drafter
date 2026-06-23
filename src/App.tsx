@@ -27,7 +27,6 @@ export function AppRoutes(): JSX.Element {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/setup" element={<SetupPage />} />
-      <Route path="/setup/:gameId" element={<SetupPage />} />
       <Route path="/play/:gameId" element={<GamePage />} />
       <Route path="/board/:gameId" element={<BoardRedirect />} />
       <Route path="*" element={<NotFoundPage />} />
