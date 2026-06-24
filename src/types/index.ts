@@ -154,6 +154,12 @@ export interface Game {
   bans: string[]
   /** The coin-flip team that acts first ("Team A"). */
   startTeam: TeamId
+  /**
+   * For odd player counts (5/7/9) the larger team uses Handicap cards; this is
+   * that team. `null` when teams are even. Informational only — the app does
+   * not simulate handicap cards.
+   */
+  handicapTeam: TeamId | null
   createdAt: number
 }
 

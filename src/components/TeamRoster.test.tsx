@@ -122,4 +122,19 @@ describe('TeamRoster', () => {
     expect(slots[1]).toHaveTextContent('Bob')
     expect(slots[2]).toHaveTextContent('Carol')
   })
+
+  it('does not render the handicap badge by default', () => {
+    render(<TeamRoster team="red" players={players} picks={picks} heroesPerTeam={3} />)
+    expect(screen.queryByTestId('handicap-badge')).not.toBeInTheDocument()
+  })
+
+  it('renders the handicap badge when handicap is true', () => {
+    render(
+      <TeamRoster team="red" players={players} picks={picks} heroesPerTeam={3} handicap />,
+    )
+    const badge = screen.getByTestId('handicap-badge')
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveTextContent(/handicap cards/i)
+    expect(badge).toHaveAccessibleName(/larger team replaces a basic card with a handicap card/i)
+  })
 })

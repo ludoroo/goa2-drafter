@@ -11,7 +11,6 @@ import type {
 } from '@/types'
 import { useGame } from '@/hooks/useGame'
 import { getHeroById } from '@/data/heroes'
-import { heroesPerTeam } from '@/services/draft'
 import { HeroSelector } from '@/components/HeroSelector'
 import { TeamRoster } from '@/components/TeamRoster'
 import { Card, cn } from '@/components/ui'
@@ -397,7 +396,11 @@ export function GamePage(): JSX.Element {
   }
 
   const { game, players, picks } = snapshot
-  const perTeam = heroesPerTeam(game.playerCount)
+  // Per-team slot targets come from the ACTUAL players in the snapshot, so
+  // odd player counts with uneven teams (e.g. 3v2) render correctly without
+  // calling the even-only `heroesPerTeam(playerCount)` helper.
+  const redTarget = players.filter((p) => p.team === 'red').length
+  const blueTarget = players.filter((p) => p.team === 'blue').length
   const picker = currentPickerId ? (players.find((p) => p.id === currentPickerId) ?? null) : null
 
   // Simultaneous Single Draft: every player picks from their own hand whenever
@@ -510,15 +513,17 @@ export function GamePage(): JSX.Element {
           team="red"
           players={players}
           picks={picks}
-          heroesPerTeam={perTeam}
+          heroesPerTeam={redTarget}
           currentPlayerId={currentPickerId}
+          handicap={game.handicapTeam === 'red'}
         />
         <TeamRoster
           team="blue"
           players={players}
           picks={picks}
-          heroesPerTeam={perTeam}
+          heroesPerTeam={blueTarget}
           currentPlayerId={currentPickerId}
+          handicap={game.handicapTeam === 'blue'}
         />
       </section>
 

@@ -5,11 +5,13 @@ import {
   buildSnakeTurns,
   coinFlipTeam,
   dealHands,
+  handicapTeamFor,
   heroesPerTeam,
   minimumPoolSize,
   nextPickerId,
   randomAssignment,
   selectRandomDraftPool,
+  teamCounts,
 } from './draft'
 
 interface MakePlayerInput {
@@ -78,6 +80,16 @@ describe('randomAssignment', () => {
     expect(Object.keys(result).sort()).toEqual(['p1', 'p2'])
     expect(new Set(Object.values(result)).size).toBe(2)
   })
+
+  it('works for odd player counts (5 players)', () => {
+    const playerIds = ['p1', 'p2', 'p3', 'p4', 'p5']
+    const heroPool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+
+    const result = randomAssignment(playerIds, heroPool, () => 0)
+
+    expect(Object.keys(result).sort()).toEqual([...playerIds].sort())
+    expect(new Set(Object.values(result)).size).toBe(5)
+  })
 })
 
 describe('heroesPerTeam', () => {
@@ -125,7 +137,7 @@ describe('nextPickerId', () => {
 })
 
 // ---------------------------------------------------------------------------
-// New helpers (T2)
+// Helpers
 // ---------------------------------------------------------------------------
 
 /** Build a sequenced rng that yields the provided values, looping at end. */
@@ -154,6 +166,26 @@ const sixPlayers = (): Player[] => [
   makePlayer({ id: 'b5', team: 'blue', seat: 5 }),
 ]
 
+/** 5 players, red=2 (smaller), blue=3 (bigger). */
+const fivePlayersRedSmaller = (): Player[] => [
+  makePlayer({ id: 'r0', team: 'red', seat: 0 }),
+  makePlayer({ id: 'b1', team: 'blue', seat: 1 }),
+  makePlayer({ id: 'r2', team: 'red', seat: 2 }),
+  makePlayer({ id: 'b3', team: 'blue', seat: 3 }),
+  makePlayer({ id: 'b4', team: 'blue', seat: 4 }),
+]
+
+/** 7 players, red=3 (smaller), blue=4 (bigger). */
+const sevenPlayersRedSmaller = (): Player[] => [
+  makePlayer({ id: 'r0', team: 'red', seat: 0 }),
+  makePlayer({ id: 'b1', team: 'blue', seat: 1 }),
+  makePlayer({ id: 'r2', team: 'red', seat: 2 }),
+  makePlayer({ id: 'b3', team: 'blue', seat: 3 }),
+  makePlayer({ id: 'r4', team: 'red', seat: 4 }),
+  makePlayer({ id: 'b5', team: 'blue', seat: 5 }),
+  makePlayer({ id: 'b6', team: 'blue', seat: 6 }),
+]
+
 describe('coinFlipTeam', () => {
   it('returns red when rng yields a value below 0.5', () => {
     expect(coinFlipTeam(() => 0)).toBe('red')
@@ -170,6 +202,43 @@ describe('coinFlipTeam', () => {
     expect(result === 'red' || result === 'blue').toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// teamCounts / handicapTeamFor / splitTeams uneven behaviour
+// ---------------------------------------------------------------------------
+
+describe('teamCounts', () => {
+  it('counts even teams', () => {
+    expect(teamCounts(fourPlayers())).toEqual({ red: 2, blue: 2 })
+    expect(teamCounts(sixPlayers())).toEqual({ red: 3, blue: 3 })
+  })
+
+  it('counts uneven teams', () => {
+    expect(teamCounts(fivePlayersRedSmaller())).toEqual({ red: 2, blue: 3 })
+    expect(teamCounts(sevenPlayersRedSmaller())).toEqual({ red: 3, blue: 4 })
+  })
+})
+
+describe('handicapTeamFor', () => {
+  it('returns null for even teams', () => {
+    expect(handicapTeamFor(fourPlayers())).toBeNull()
+    expect(handicapTeamFor(sixPlayers())).toBeNull()
+  })
+
+  it('returns the bigger team for uneven teams (5 players, red=2/blue=3)', () => {
+    expect(handicapTeamFor(fivePlayersRedSmaller())).toBe('blue')
+    // The bigger team is independent of startTeam — it's purely about sizes.
+    expect(handicapTeamFor(fivePlayersRedSmaller())).toBe('blue')
+  })
+
+  it('returns the bigger team for 7 players (red=3/blue=4)', () => {
+    expect(handicapTeamFor(sevenPlayersRedSmaller())).toBe('blue')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildAllPickTurns
+// ---------------------------------------------------------------------------
 
 describe('buildAllPickTurns', () => {
   it('produces one collective pick turn per player alternating by team', () => {
@@ -201,7 +270,52 @@ describe('buildAllPickTurns', () => {
     expect(turns.every((t) => t.playerId === null)).toBe(true)
     expect(turns.map((t) => t.team)).toEqual(['red', 'blue', 'red', 'blue', 'red', 'blue'])
   })
+
+  it('handles uneven teams (5 players, red=2/blue=3, startTeam=red): red,blue,red,blue,blue', () => {
+    const players = fivePlayersRedSmaller()
+    const turns = buildAllPickTurns(players, 'red')
+
+    expect(turns).toHaveLength(5)
+    expect(turns.every((t) => t.kind === 'pick')).toBe(true)
+    expect(turns.every((t) => t.playerId === null)).toBe(true)
+    expect(turns.map((t) => t.team)).toEqual(['red', 'blue', 'red', 'blue', 'blue'])
+  })
+
+  it('handles uneven teams (5 players, startTeam=blue means smaller team red is non-start)', () => {
+    // Here startTeam=blue (the bigger team). Alternation: blue, red, blue, red, blue (blue exhausts last)
+    // Walk: A=blue,B=red. b1 r1 b2 r2 b3
+    const players = fivePlayersRedSmaller()
+    const turns = buildAllPickTurns(players, 'blue')
+
+    expect(turns).toHaveLength(5)
+    expect(turns.map((t) => t.team)).toEqual(['blue', 'red', 'blue', 'red', 'blue'])
+  })
+
+  it('handles 7 players (red=3/blue=4) startTeam=red totals', () => {
+    const players = sevenPlayersRedSmaller()
+    const turns = buildAllPickTurns(players, 'red')
+
+    expect(turns).toHaveLength(7)
+    const redCount = turns.filter((t) => t.team === 'red').length
+    const blueCount = turns.filter((t) => t.team === 'blue').length
+    expect(redCount).toBe(3)
+    expect(blueCount).toBe(4)
+    // Sequence: red,blue,red,blue,red,blue,blue (red exhausts after 3)
+    expect(turns.map((t) => t.team)).toEqual([
+      'red',
+      'blue',
+      'red',
+      'blue',
+      'red',
+      'blue',
+      'blue',
+    ])
+  })
 })
+
+// ---------------------------------------------------------------------------
+// buildSnakeTurns
+// ---------------------------------------------------------------------------
 
 describe('buildSnakeTurns', () => {
   it('produces collective snake turns with team pattern [red,blue,blue,red] for 4 players startTeam=red', () => {
@@ -241,16 +355,88 @@ describe('buildSnakeTurns', () => {
     expect(turns.map((t) => t.team)).toEqual(['blue', 'red', 'red', 'blue', 'blue', 'red'])
   })
 
-  it('throws when teams are not equal size', () => {
+  // Uneven snake (5 players, red=2/blue=3, startTeam=red).
+  // Base snake (A=red, B=blue): A,B,B,A,A → red,blue,blue,red,red
+  //   i=0 red  -> red:1
+  //   i=1 blue -> blue:1
+  //   i=2 blue -> blue:2
+  //   i=3 red  -> red:2 (FULL)
+  //   i=4 base would be red, but red is full → fall to blue → blue:3 (FULL)
+  // Result: [red, blue, blue, red, blue]
+  it('handles uneven teams (5 players, red=2/blue=3, startTeam=red): [red,blue,blue,red,blue]', () => {
+    const players = fivePlayersRedSmaller()
+    const turns = buildSnakeTurns(players, 'red')
+
+    expect(turns).toHaveLength(5)
+    expect(turns.every((t) => t.kind === 'pick')).toBe(true)
+    expect(turns.every((t) => t.playerId === null)).toBe(true)
+    expect(turns.map((t) => t.team)).toEqual(['red', 'blue', 'blue', 'red', 'blue'])
+  })
+
+  it('handles uneven teams when startTeam=blue (5 players, red=2/blue=3)', () => {
+    // Base snake (A=blue, B=red): A,B,B,A,A → blue,red,red,blue,blue
+    //   i=0 blue -> blue:1
+    //   i=1 red  -> red:1
+    //   i=2 red  -> red:2 (FULL)
+    //   i=3 blue -> blue:2
+    //   i=4 blue -> blue:3 (FULL)
+    // Result: [blue, red, red, blue, blue]
+    const players = fivePlayersRedSmaller()
+    const turns = buildSnakeTurns(players, 'blue')
+
+    expect(turns).toHaveLength(5)
+    expect(turns.map((t) => t.team)).toEqual(['blue', 'red', 'red', 'blue', 'blue'])
+  })
+
+  it('handles 7 players (red=3/blue=4, startTeam=red) totals and length', () => {
+    // Base snake (A=red,B=blue): A,B,B,A,A,B,B → red,blue,blue,red,red,blue,blue
+    //   i=0 red  -> red:1
+    //   i=1 blue -> blue:1
+    //   i=2 blue -> blue:2
+    //   i=3 red  -> red:2
+    //   i=4 red  -> red:3 (FULL)
+    //   i=5 blue -> blue:3
+    //   i=6 blue -> blue:4 (FULL)
+    // Result: [red,blue,blue,red,red,blue,blue]
+    const players = sevenPlayersRedSmaller()
+    const turns = buildSnakeTurns(players, 'red')
+
+    expect(turns).toHaveLength(7)
+    expect(turns.filter((t) => t.team === 'red')).toHaveLength(3)
+    expect(turns.filter((t) => t.team === 'blue')).toHaveLength(4)
+    expect(turns.map((t) => t.team)).toEqual([
+      'red',
+      'blue',
+      'blue',
+      'red',
+      'red',
+      'blue',
+      'blue',
+    ])
+  })
+
+  it('throws when teams differ by more than one player', () => {
     const players: Player[] = [
       makePlayer({ id: 'r0', team: 'red', seat: 0 }),
       makePlayer({ id: 'r1', team: 'red', seat: 1 }),
-      makePlayer({ id: 'b2', team: 'blue', seat: 2 }),
+      makePlayer({ id: 'r2', team: 'red', seat: 2 }),
+      makePlayer({ id: 'b3', team: 'blue', seat: 3 }),
     ]
 
-    expect(() => buildSnakeTurns(players, 'red')).toThrow('teams must be equal size')
+    expect(() => buildSnakeTurns(players, 'red')).toThrow(
+      'teams must differ by at most one player',
+    )
+  })
+
+  it('does NOT throw when teams differ by exactly one player', () => {
+    const players = fivePlayersRedSmaller()
+    expect(() => buildSnakeTurns(players, 'red')).not.toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// buildPickBanTurns
+// ---------------------------------------------------------------------------
 
 describe('buildPickBanTurns', () => {
   it('produces the exact rulebook sequence for H=2 (4 players), startTeam=red', () => {
@@ -318,14 +504,77 @@ describe('buildPickBanTurns', () => {
     expect(turns.every((t) => t.playerId === null)).toBe(true)
   })
 
-  it('throws when teams are not equal size', () => {
+  // Uneven pick-and-ban (5 players, red=2/blue=3, startTeam=red).
+  // banRounds = min(red,blue) = min(2,3) = 2.
+  //   round 0 (leader=A=red): ban red, ban blue
+  //   round 1 (leader=B=blue): ban blue, ban red
+  //   → 4 bans (2 each).
+  // Pick phase alternates A,B,A,B... while each team still has slots:
+  //   pick red (red:1), pick blue (blue:1), pick red (red:2 FULL),
+  //   pick blue (blue:2), pick blue (blue:3 FULL)
+  //   → 5 picks: red, blue, red, blue, blue
+  // Total turns = 4 bans + 5 picks = 9.
+  it('handles uneven teams (5 players, red=2/blue=3, startTeam=red)', () => {
+    const players = fivePlayersRedSmaller()
+    const turns = buildPickBanTurns(players, 'red')
+
+    const expected: Array<[DraftTurn['kind'], TeamId]> = [
+      // banRounds = 2
+      ['ban', 'red'],
+      ['ban', 'blue'],
+      ['ban', 'blue'],
+      ['ban', 'red'],
+      // picks
+      ['pick', 'red'],
+      ['pick', 'blue'],
+      ['pick', 'red'],
+      ['pick', 'blue'],
+      ['pick', 'blue'],
+    ]
+    expect(turns).toHaveLength(expected.length)
+    turns.forEach((t, i) => {
+      expect(t.kind).toBe(expected[i][0])
+      expect(t.team).toBe(expected[i][1])
+      expect(t.playerId).toBeNull()
+    })
+
+    const picks = turns.filter((t) => t.kind === 'pick')
+    const bans = turns.filter((t) => t.kind === 'ban')
+    expect(picks).toHaveLength(5)
+    expect(bans).toHaveLength(4)
+    expect(bans.filter((b) => b.team === 'red')).toHaveLength(2)
+    expect(bans.filter((b) => b.team === 'blue')).toHaveLength(2)
+    expect(picks.filter((p) => p.team === 'red')).toHaveLength(2)
+    expect(picks.filter((p) => p.team === 'blue')).toHaveLength(3)
+  })
+
+  it('handles uneven teams (7 players, red=3/blue=4, startTeam=red) totals', () => {
+    // banRounds = min(3,4) = 3. 6 bans (3 each). 7 picks (red 3, blue 4).
+    const players = sevenPlayersRedSmaller()
+    const turns = buildPickBanTurns(players, 'red')
+
+    const bans = turns.filter((t) => t.kind === 'ban')
+    const picks = turns.filter((t) => t.kind === 'pick')
+    expect(bans).toHaveLength(6)
+    expect(picks).toHaveLength(7)
+    expect(bans.filter((b) => b.team === 'red')).toHaveLength(3)
+    expect(bans.filter((b) => b.team === 'blue')).toHaveLength(3)
+    expect(picks.filter((p) => p.team === 'red')).toHaveLength(3)
+    expect(picks.filter((p) => p.team === 'blue')).toHaveLength(4)
+    expect(turns).toHaveLength(13)
+  })
+
+  it('throws when teams differ by more than one player', () => {
     const players: Player[] = [
       makePlayer({ id: 'r0', team: 'red', seat: 0 }),
       makePlayer({ id: 'r1', team: 'red', seat: 1 }),
-      makePlayer({ id: 'b2', team: 'blue', seat: 2 }),
+      makePlayer({ id: 'r2', team: 'red', seat: 2 }),
+      makePlayer({ id: 'b3', team: 'blue', seat: 3 }),
     ]
 
-    expect(() => buildPickBanTurns(players, 'red')).toThrow('teams must be equal size')
+    expect(() => buildPickBanTurns(players, 'red')).toThrow(
+      'teams must differ by at most one player',
+    )
   })
 })
 
@@ -361,6 +610,14 @@ describe('selectRandomDraftPool', () => {
 
     expect(result).toHaveLength(6)
     expect(new Set(result).size).toBe(6)
+  })
+
+  it('works for odd player counts (5)', () => {
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+    const result = selectRandomDraftPool(pool, 5, () => 0)
+
+    expect(result).toHaveLength(7)
+    expect(new Set(result).size).toBe(7)
   })
 })
 
@@ -400,6 +657,16 @@ describe('dealHands', () => {
 
     expect(a).toEqual(b)
   })
+
+  it('works for 5 players (odd)', () => {
+    const playerIds = ['p1', 'p2', 'p3', 'p4', 'p5']
+    const pool = Array.from({ length: 15 }, (_, i) => `h${i + 1}`)
+    const hands = dealHands(playerIds, pool, 3, () => 0)
+
+    expect(Object.keys(hands).sort()).toEqual([...playerIds].sort())
+    const all = playerIds.flatMap((id) => hands[id])
+    expect(new Set(all).size).toBe(15)
+  })
 })
 
 describe('minimumPoolSize (method-aware)', () => {
@@ -423,9 +690,27 @@ describe('minimumPoolSize (method-aware)', () => {
     expect(minimumPoolSize(10, 'single-draft')).toBe(30)
   })
 
-  it('returns 2 * playerCount for pick-and-ban', () => {
+  it('returns 2 * playerCount for pick-and-ban (even)', () => {
     expect(minimumPoolSize(4, 'pick-and-ban')).toBe(8)
     expect(minimumPoolSize(6, 'pick-and-ban')).toBe(12)
     expect(minimumPoolSize(10, 'pick-and-ban')).toBe(20)
+  })
+
+  it('handles odd player counts correctly', () => {
+    // 5 players, all-pick/snake: 5
+    expect(minimumPoolSize(5)).toBe(5)
+    expect(minimumPoolSize(5, 'snake')).toBe(5)
+    expect(minimumPoolSize(5, 'all-pick')).toBe(5)
+    expect(minimumPoolSize(5, 'random')).toBe(5)
+    // random-draft: 5 + 2 = 7
+    expect(minimumPoolSize(5, 'random-draft')).toBe(7)
+    // single-draft: 5 * 3 = 15
+    expect(minimumPoolSize(5, 'single-draft')).toBe(15)
+    // pick-and-ban: 5 + 2*floor(5/2) = 5 + 4 = 9
+    expect(minimumPoolSize(5, 'pick-and-ban')).toBe(9)
+    // 7 players, pick-and-ban: 7 + 2*3 = 13
+    expect(minimumPoolSize(7, 'pick-and-ban')).toBe(13)
+    // 9 players, pick-and-ban: 9 + 2*4 = 17
+    expect(minimumPoolSize(9, 'pick-and-ban')).toBe(17)
   })
 })

@@ -180,6 +180,46 @@ describe('GamePage', () => {
     expect(await screen.findByRole('heading', { name: /game not found/i })).toBeInTheDocument()
   })
 
+  it('renders an odd-count game (5 players, uneven teams) without crashing and shows the handicap badge on the bigger team', async () => {
+    // 3 red vs 2 blue — uneven by construction. Regression for the crash that
+    // happened when GamePage called `heroesPerTeam(playerCount)` on an odd
+    // player count (which throws).
+    const created = await gameStore.createGame({
+      playerCount: 5,
+      method: 'all-pick',
+      heroPool: POOL,
+      players: [
+        { name: 'R0', team: 'red', seat: 0 },
+        { name: 'R1', team: 'red', seat: 1 },
+        { name: 'R2', team: 'red', seat: 2 },
+        { name: 'B0', team: 'blue', seat: 3 },
+        { name: 'B1', team: 'blue', seat: 4 },
+      ],
+    })
+    // Sanity: the store should have set handicapTeam to the bigger team (red).
+    expect(created.game.handicapTeam).toBe('red')
+
+    renderAt(`/play/${created.game.id}`)
+
+    // The page mounts without throwing — both rosters are visible.
+    const redRoster = await screen.findByLabelText('Red Team roster')
+    const blueRoster = await screen.findByLabelText('Blue Team roster')
+    expect(redRoster).toBeInTheDocument()
+    expect(blueRoster).toBeInTheDocument()
+
+    // Per-team slot counts reflect the actual team sizes (3 and 2), not a
+    // crash from `heroesPerTeam(5)`.
+    expect(within(redRoster).getByText(/0\s*\/\s*3 picked/i)).toBeInTheDocument()
+    expect(within(blueRoster).getByText(/0\s*\/\s*2 picked/i)).toBeInTheDocument()
+
+    // The handicap badge appears on the bigger team — derived from the
+    // snapshot rather than hard-coded.
+    const biggerRoster = created.game.handicapTeam === 'red' ? redRoster : blueRoster
+    const smallerRoster = created.game.handicapTeam === 'red' ? blueRoster : redRoster
+    expect(within(biggerRoster).getByTestId('handicap-badge')).toBeInTheDocument()
+    expect(within(smallerRoster).queryByTestId('handicap-badge')).not.toBeInTheDocument()
+  })
+
   // -------------------------------------------------------------------------
   // T7: generalized for all methods
   // -------------------------------------------------------------------------

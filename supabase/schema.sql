@@ -113,6 +113,12 @@ alter table public.games
 alter table public.games
   add column if not exists start_team text  not null default 'red';
 
+-- For odd player counts (5/7/9) the larger team uses Handicap cards; this is
+-- that team. Nullable (and null for even teams). Non-sensitive — exposed via
+-- the anon column GRANT below and included in RPC snapshot payloads.
+alter table public.games
+  add column if not exists handicap_team text;
+
 -- Refresh the method check constraint to include the new draft methods.
 do $$ begin
   if exists (
@@ -230,7 +236,7 @@ create policy picks_anon_select   on public.picks   for select to anon using (tr
 revoke select on public.games   from anon;
 grant  select (
   id, status, player_count, method, hero_pool, draft_order, current_pick,
-  turns, bans, start_team, created_at
+  turns, bans, start_team, handicap_team, created_at
 ) on public.games to anon;
 
 revoke select on public.players from anon;
@@ -393,6 +399,7 @@ begin
         'turns',        g.turns,
         'bans',         g.bans,
         'start_team',   g.start_team,
+        'handicap_team', g.handicap_team,
         'created_at',   g.created_at
       ),
       'players', coalesce(
@@ -544,6 +551,7 @@ begin
       'turns',        g.turns,
       'bans',         g.bans,
       'start_team',   g.start_team,
+      'handicap_team', g.handicap_team,
       'created_at',   g.created_at
     ),
     'players', coalesce(
@@ -666,6 +674,7 @@ begin
       'turns',        g.turns,
       'bans',         g.bans,
       'start_team',   g.start_team,
+      'handicap_team', g.handicap_team,
       'created_at',   g.created_at
     ),
     'players', coalesce(

@@ -956,4 +956,261 @@ describe('LocalGameStore — coin flip & startTeam recorded', () => {
       expect(game.startTeam === 'red' || game.startTeam === 'blue').toBe(true)
     }
   })
+
+  it('records handicapTeam === null for even player counts (regression)', async () => {
+    const store = new LocalGameStore()
+    const bigPool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12']
+    const { game } = await store.createGame(fourPlayerInputFor('all-pick', bigPool))
+    expect(game.handicapTeam).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Odd player counts (5/7/9) — uneven teams with handicapTeam tracked.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a CreateGameInput for an odd count where the bigger team has
+ * `bigSize` players (red) and the smaller has `bigSize - 1` (blue). startTeam
+ * is a Math.random coin flip, so tests derive expected behaviour from the
+ * actual snapshot rather than hard-coding which team is bigger.
+ */
+const oddPlayerInputFor = (
+  method: DraftMethod,
+  heroPool: string[],
+  redCount: number,
+  blueCount: number,
+): CreateGameInput => {
+  const players: CreateGameInput['players'] = []
+  let seat = 0
+  for (let i = 0; i < redCount; i++) {
+    players.push({ name: `R${i}`, team: 'red', seat: seat++ })
+  }
+  for (let i = 0; i < blueCount; i++) {
+    players.push({ name: `B${i}`, team: 'blue', seat: seat++ })
+  }
+  return { playerCount: redCount + blueCount, method, heroPool, players }
+}
+
+describe('LocalGameStore — odd player counts (uneven teams)', () => {
+  beforeEach(() => {
+    clearStorage()
+  })
+
+  it('creates a 5-player all-pick game with handicapTeam set to the bigger team and 5 pick turns', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+    const { game, players } = await store.createGame(oddPlayerInputFor('all-pick', pool, 3, 2))
+
+    expect(game.method).toBe('all-pick')
+    expect(game.status).toBe('drafting')
+    expect(game.playerCount).toBe(5)
+    expect(game.turns).toHaveLength(5)
+    for (const t of game.turns) {
+      expect(t.kind).toBe('pick')
+      expect(t.playerId).toBeNull()
+    }
+    // Bigger team is red (3 players); handicapTeam should match.
+    const redCount = players.filter((p) => p.team === 'red').length
+    const blueCount = players.filter((p) => p.team === 'blue').length
+    expect(redCount).toBe(3)
+    expect(blueCount).toBe(2)
+    expect(game.handicapTeam).toBe('red')
+  })
+
+  it('completes a 5-player all-pick playthrough with correct per-team pick counts (3v2)', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+    const { game, players } = await store.createGame(oddPlayerInputFor('all-pick', pool, 3, 2))
+
+    const playersById = new Map(players.map((p) => [p.id, p]))
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    const remaining = [...pool]
+    for (let i = 0; i < snap.game.turns.length; i++) {
+      const turn = snap.game.turns[snap.game.currentPick]!
+      const picker = players.find(
+        (p) => p.team === turn.team && !snap.picks.some((pk) => pk.playerId === p.id),
+      )!
+      const heroId = remaining.shift()!
+      const r = await store.makePick(game.id, picker.token, heroId)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok at turn ${i}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(5)
+    const perTeam: Record<TeamId, number> = { red: 0, blue: 0 }
+    for (const pk of snap.picks) {
+      const owner = playersById.get(pk.playerId)!
+      perTeam[owner.team]++
+    }
+    expect(perTeam.red).toBe(3)
+    expect(perTeam.blue).toBe(2)
+    // Each player owns exactly one hero.
+    expect(new Set(snap.picks.map((pk) => pk.playerId))).toEqual(new Set(players.map((p) => p.id)))
+    // handicapTeam persisted through to completion.
+    expect(snap.game.handicapTeam).toBe('red')
+  })
+
+  it('completes a 5-player snake draft with uneven teams (3v2)', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+    const { game, players } = await store.createGame(oddPlayerInputFor('snake', pool, 3, 2))
+
+    expect(game.method).toBe('snake')
+    expect(game.turns).toHaveLength(5)
+    expect(game.handicapTeam).toBe('red')
+
+    const playersById = new Map(players.map((p) => [p.id, p]))
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    const remaining = [...pool]
+    for (let i = 0; i < snap.game.turns.length; i++) {
+      const turn = snap.game.turns[snap.game.currentPick]!
+      const picker = players.find(
+        (p) => p.team === turn.team && !snap.picks.some((pk) => pk.playerId === p.id),
+      )!
+      const heroId = remaining.shift()!
+      const r = await store.makePick(game.id, picker.token, heroId)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok at turn ${i}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(5)
+    const perTeam: Record<TeamId, number> = { red: 0, blue: 0 }
+    for (const pk of snap.picks) {
+      const owner = playersById.get(pk.playerId)!
+      perTeam[owner.team]++
+    }
+    expect(perTeam.red).toBe(3)
+    expect(perTeam.blue).toBe(2)
+  })
+
+  it('completes a 5-player pick-and-ban draft with uneven teams (3v2)', async () => {
+    const store = new LocalGameStore()
+    // pool needs picks (5) + 2*banRounds (2*2=4) = 9 heroes minimum.
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9']
+    const { game, players } = await store.createGame(oddPlayerInputFor('pick-and-ban', pool, 3, 2))
+
+    expect(game.method).toBe('pick-and-ban')
+    expect(game.handicapTeam).toBe('red')
+    // 5 picks + 4 bans (2 symmetric rounds with 2 players smaller team) = 9 turns.
+    const pickTurns = game.turns.filter((t) => t.kind === 'pick').length
+    const banTurns = game.turns.filter((t) => t.kind === 'ban').length
+    expect(pickTurns).toBe(5)
+    expect(banTurns).toBe(4)
+
+    const playersById = new Map(players.map((p) => [p.id, p]))
+    const byTeam: Record<TeamId, typeof players> = {
+      red: players.filter((p) => p.team === 'red'),
+      blue: players.filter((p) => p.team === 'blue'),
+    }
+
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    const remaining = [...pool]
+    for (let i = 0; i < snap.game.turns.length; i++) {
+      const turn = snap.game.turns[snap.game.currentPick]!
+      const actingTeam = turn.team
+      const actor =
+        turn.kind === 'pick'
+          ? byTeam[actingTeam].find((p) => !snap.picks.some((pk) => pk.playerId === p.id))!
+          : byTeam[actingTeam][0]!
+      const target = remaining.shift()!
+      const r = await store.makePick(game.id, actor.token, target)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok at turn ${i}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(5)
+    expect(snap.game.bans).toHaveLength(4)
+    const perTeam: Record<TeamId, number> = { red: 0, blue: 0 }
+    for (const pk of snap.picks) {
+      const owner = playersById.get(pk.playerId)!
+      perTeam[owner.team]++
+    }
+    expect(perTeam.red).toBe(3)
+    expect(perTeam.blue).toBe(2)
+  })
+
+  it('completes a 5-player single-draft simultaneously with handicapTeam set', async () => {
+    const store = new LocalGameStore()
+    // need 5*3 = 15 heroes minimum for hands.
+    const pool = [
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'h7',
+      'h8',
+      'h9',
+      'h10',
+      'h11',
+      'h12',
+      'h13',
+      'h14',
+      'h15',
+    ]
+    const { game, players } = await store.createGame(oddPlayerInputFor('single-draft', pool, 3, 2))
+
+    expect(game.method).toBe('single-draft')
+    expect(game.turns).toEqual([])
+    expect(game.handicapTeam).toBe('red')
+
+    // Each player picks one from their hand, simultaneously.
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    for (const p of players) {
+      const view = await store.getPlayerView(game.id, p.token)
+      const hand = view!.hand!
+      const r = await store.makePick(game.id, p.token, hand[0]!)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok for player ${p.name}, got ${r.error}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(5)
+    expect(new Set(snap.picks.map((pk) => pk.playerId))).toEqual(new Set(players.map((p) => p.id)))
+    expect(snap.game.handicapTeam).toBe('red')
+  })
+
+  it('completes a 7-player all-pick draft (4v3) with handicapTeam = bigger team', async () => {
+    const store = new LocalGameStore()
+    const pool = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8']
+    const { game, players } = await store.createGame(oddPlayerInputFor('all-pick', pool, 4, 3))
+
+    expect(game.playerCount).toBe(7)
+    expect(game.turns).toHaveLength(7)
+    expect(game.handicapTeam).toBe('red')
+
+    const playersById = new Map(players.map((p) => [p.id, p]))
+    let snap = (await store.getSnapshot(game.id)) as GameSnapshot
+    const remaining = [...pool]
+    for (let i = 0; i < snap.game.turns.length; i++) {
+      const turn = snap.game.turns[snap.game.currentPick]!
+      const picker = players.find(
+        (p) => p.team === turn.team && !snap.picks.some((pk) => pk.playerId === p.id),
+      )!
+      const heroId = remaining.shift()!
+      const r = await store.makePick(game.id, picker.token, heroId)
+      expect(r.ok).toBe(true)
+      if (!r.ok) throw new Error(`expected ok at turn ${i}`)
+      snap = r.snapshot
+    }
+
+    expect(snap.game.status).toBe('complete')
+    expect(snap.picks).toHaveLength(7)
+    const perTeam: Record<TeamId, number> = { red: 0, blue: 0 }
+    for (const pk of snap.picks) {
+      const owner = playersById.get(pk.playerId)!
+      perTeam[owner.team]++
+    }
+    expect(perTeam.red).toBe(4)
+    expect(perTeam.blue).toBe(3)
+  })
 })

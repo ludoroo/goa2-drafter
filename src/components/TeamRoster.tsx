@@ -10,6 +10,7 @@ export interface TeamRosterProps {
   heroesPerTeam: number
   currentPlayerId?: string | null
   title?: string
+  handicap?: boolean
 }
 
 const TEAM_DEFAULT_TITLE: Record<TeamId, string> = {
@@ -59,6 +60,7 @@ export function TeamRoster({
   heroesPerTeam,
   currentPlayerId = null,
   title,
+  handicap = false,
 }: TeamRosterProps): JSX.Element {
   const accent = TEAM_ACCENT[team]
   const headingTitle = title ?? TEAM_DEFAULT_TITLE[team]
@@ -91,6 +93,16 @@ export function TeamRoster({
           >
             {headingTitle}
           </h2>
+          {handicap ? (
+            <span
+              data-testid="handicap-badge"
+              aria-label="Larger team replaces a basic card with a Handicap card."
+              title="Larger team replaces a basic card with a Handicap card."
+              className="shrink-0 rounded-full border border-amber-400/70 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-200"
+            >
+              ⚑ Handicap cards
+            </span>
+          ) : null}
         </div>
         <span className="shrink-0 text-xs font-medium text-slate-400">
           {pickedCount} / {heroesPerTeam} picked

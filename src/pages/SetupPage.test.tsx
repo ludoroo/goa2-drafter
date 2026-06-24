@@ -50,6 +50,15 @@ describe('SetupPage — Step 1 (Players)', () => {
     await user.click(screen.getByRole('switch', { name: /6 players/i }))
     expect(screen.getAllByRole('textbox')).toHaveLength(6)
   })
+
+  it('switching to 5 players renders 5 name inputs', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+    await user.click(screen.getByRole('switch', { name: /5 players/i }))
+    expect(screen.getAllByRole('textbox')).toHaveLength(5)
+    expect(screen.getByLabelText('Player 1 name')).toBeInTheDocument()
+    expect(screen.getByLabelText('Player 5 name')).toBeInTheDocument()
+  })
 })
 
 describe('SetupPage — Step 2 (Teams)', () => {
@@ -102,6 +111,69 @@ describe('SetupPage — Step 2 (Teams)', () => {
     await user.click(redChips[1]!)
 
     expect(screen.getByTestId('step-validation')).toHaveTextContent(/teams must be balanced/i)
+    expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
+  })
+})
+
+describe('SetupPage — Step 2 (Teams) — odd player counts', () => {
+  it('randomise on 5 players produces a 3/2 split and enables Next', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+    // Switch to 5 players.
+    await user.click(screen.getByRole('switch', { name: /5 players/i }))
+    // Step 1 → Step 2.
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    await user.click(screen.getByRole('button', { name: /randomise teams/i }))
+
+    const status = screen.getByRole('status')
+    // Total must be 5; sizes must be {2, 3} in some order.
+    const redMatch = status.textContent?.match(/Red:\s*(\d+)/)
+    const blueMatch = status.textContent?.match(/Blue:\s*(\d+)/)
+    expect(redMatch).not.toBeNull()
+    expect(blueMatch).not.toBeNull()
+    const red = Number(redMatch?.[1])
+    const blue = Number(blueMatch?.[1])
+    expect(red + blue).toBe(5)
+    expect(Math.min(red, blue)).toBe(2)
+    expect(Math.max(red, blue)).toBe(3)
+    expect(status.textContent).toMatch(/balanced/i)
+    expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
+  })
+
+  it('manual 3/2 assignment on 5 players is valid; 4/1 (capped) keeps Next disabled', async () => {
+    const user = userEvent.setup()
+    renderSetup()
+    await user.click(screen.getByRole('switch', { name: /5 players/i }))
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    // Per-team cap for 5 players is 3. Assign 3 to Red, 2 to Blue.
+    let redChips = screen.getAllByRole('switch', { name: 'Red' })
+    let blueChips = screen.getAllByRole('switch', { name: 'Blue' })
+    expect(redChips).toHaveLength(5)
+    await user.click(redChips[0]!)
+    await user.click(redChips[1]!)
+    await user.click(redChips[2]!)
+    await user.click(blueChips[3]!)
+    await user.click(blueChips[4]!)
+
+    expect(screen.getByRole('status')).toHaveTextContent(/balanced/i)
+    expect(screen.getByRole('button', { name: /^next$/i })).not.toBeDisabled()
+
+    // Now try to push a 4th onto Red — the cap should block it. We toggle
+    // player 4 off Blue and onto Red; Red is already at capacity (3) so the
+    // Red click is a no-op, leaving the player unassigned → 3/1 (unbalanced).
+    blueChips = screen.getAllByRole('switch', { name: 'Blue' })
+    await user.click(blueChips[3]!) // toggle off Blue
+    redChips = screen.getAllByRole('switch', { name: 'Red' })
+    await user.click(redChips[3]!) // attempt to add to Red — blocked by cap
+
+    const status = screen.getByRole('status')
+    // Red should still be at 3 (cap held), Blue dropped to 1.
+    expect(status.textContent).toMatch(/Red:\s*3/)
+    expect(status.textContent).toMatch(/Blue:\s*1/)
+    expect(screen.getByTestId('step-validation')).toHaveTextContent(/teams must be balanced/i)
+    expect(screen.getByTestId('step-validation')).toHaveTextContent(/3 and 2/)
     expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled()
   })
 })

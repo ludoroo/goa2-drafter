@@ -28,6 +28,7 @@ const baseGameRow = (overrides: Partial<GameRow> = {}): GameRow => ({
   turns: [],
   bans: [],
   start_team: 'red',
+  handicap_team: null,
   organiser_token: 'tok',
   created_at: '2024-01-01T00:00:00.000Z',
   ...overrides,
@@ -45,6 +46,7 @@ describe('SupabaseGameStore mappers', () => {
         turns,
         bans: ['hero-x'],
         start_team: 'blue',
+        handicap_team: 'red',
       })
 
       const game = gameFromRow(row)
@@ -56,6 +58,7 @@ describe('SupabaseGameStore mappers', () => {
       expect(game.turns).toEqual(turns)
       expect(game.bans).toEqual(['hero-x'])
       expect(game.startTeam).toBe('blue')
+      expect(game.handicapTeam).toBe('red')
       expect(game.createdAt).toBe(Date.parse('2024-01-01T00:00:00.000Z'))
     })
 
@@ -68,6 +71,7 @@ describe('SupabaseGameStore mappers', () => {
         turns: null,
         bans: null,
         start_team: null,
+        handicap_team: null,
       } as unknown as GameRow
 
       const game = gameFromRow(row)
@@ -75,6 +79,20 @@ describe('SupabaseGameStore mappers', () => {
       expect(game.turns).toEqual([])
       expect(game.bans).toEqual([])
       expect(game.startTeam).toBe('red')
+      expect(game.handicapTeam).toBeNull()
+    })
+
+    it('maps handicap_team "blue" through to handicapTeam', () => {
+      const game = gameFromRow(baseGameRow({ handicap_team: 'blue' }))
+      expect(game.handicapTeam).toBe('blue')
+    })
+
+    it('defaults handicapTeam to null for non-team-id values (defensive)', () => {
+      const row = {
+        ...baseGameRow(),
+        handicap_team: 'garbage',
+      } as unknown as GameRow
+      expect(gameFromRow(row).handicapTeam).toBeNull()
     })
 
     it('returns fresh array copies (mutating game.turns does not mutate the row)', () => {

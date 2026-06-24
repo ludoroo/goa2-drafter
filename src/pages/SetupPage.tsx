@@ -25,7 +25,7 @@ import { Button, Card, Chip, cn } from '@/components/ui'
 // Constants & helpers
 // ---------------------------------------------------------------------------
 
-const PLAYER_COUNTS = [4, 6, 8, 10] as const
+const PLAYER_COUNTS = [4, 5, 6, 7, 8, 9, 10] as const
 type PlayerCount = (typeof PLAYER_COUNTS)[number]
 
 interface PlayerDraft {
@@ -77,7 +77,8 @@ function Step1Players({
     <Card>
       <h2 className="mb-4 text-xl font-semibold text-teal-300">Step 1 — Players</h2>
       <p className="mb-3 text-sm text-slate-400">
-        Even-numbered groups only. Pick a count, then enter each player&apos;s name.
+        4 to 10 players. Pick a count, then enter each player&apos;s name. Odd counts use uneven
+        teams (the larger side gets a Handicap card).
       </p>
       <div className="mb-6 flex flex-wrap gap-2">
         {PLAYER_COUNTS.map((n) => (
@@ -123,18 +124,22 @@ interface Step2Props {
 }
 
 function Step2Teams({ players, setPlayers }: Step2Props): JSX.Element {
+  const n = players.length
+  const lo = Math.floor(n / 2)
+  const hi = Math.ceil(n / 2)
   const redCount = players.filter((p) => p.team === 'red').length
   const blueCount = players.filter((p) => p.team === 'blue').length
-  const target = players.length / 2
-  const balanced = redCount === target && blueCount === target
+  const balanced =
+    Math.min(redCount, blueCount) === lo &&
+    Math.max(redCount, blueCount) === hi &&
+    redCount + blueCount === n
 
   const randomise = (): void => {
     const indexes = shuffleArray(players.map((_, i) => i))
-    const half = players.length / 2
     const next = players.map((p) => ({ ...p, team: null as TeamId | null }))
     for (let k = 0; k < indexes.length; k++) {
       const idx = indexes[k] as number
-      next[idx] = { ...(next[idx] as PlayerDraft), team: k < half ? 'red' : 'blue' }
+      next[idx] = { ...(next[idx] as PlayerDraft), team: k < hi ? 'red' : 'blue' }
     }
     setPlayers(next)
   }
@@ -147,6 +152,11 @@ function Step2Teams({ players, setPlayers }: Step2Props): JSX.Element {
     setPlayers(next)
   }
 
+  const targetMessage =
+    lo === hi
+      ? `assign ${hi} players to each side.`
+      : `teams must be ${hi} and ${lo} (one player uses Handicap cards).`
+
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -156,14 +166,16 @@ function Step2Teams({ players, setPlayers }: Step2Props): JSX.Element {
         </Button>
       </div>
       <p className="mb-6 text-sm text-slate-400">
-        Assign each player to Red or Blue, or hit randomise for an even split. Each team needs{' '}
-        {target} players.
+        Assign each player to Red or Blue, or hit randomise.{' '}
+        {lo === hi
+          ? `Each team needs ${hi} players.`
+          : `Teams will be ${hi} and ${lo} — the larger side gets a Handicap card.`}
       </p>
 
       <div className="space-y-2">
         {players.map((p, i) => {
-          const redFull = redCount >= target && p.team !== 'red'
-          const blueFull = blueCount >= target && p.team !== 'blue'
+          const redFull = redCount >= hi && p.team !== 'red'
+          const blueFull = blueCount >= hi && p.team !== 'blue'
           return (
             <div
               key={i}
@@ -203,7 +215,7 @@ function Step2Teams({ players, setPlayers }: Step2Props): JSX.Element {
         role="status"
       >
         Red: {redCount} &middot; Blue: {blueCount}{' '}
-        {balanced ? '— teams are balanced.' : `— assign ${target} players to each side.`}
+        {balanced ? '— teams are balanced.' : `— ${targetMessage}`}
       </div>
     </Card>
   )
@@ -609,7 +621,12 @@ function SetupWizard(): JSX.Element {
 
   const redCount = players.filter((p) => p.team === 'red').length
   const blueCount = players.filter((p) => p.team === 'blue').length
-  const teamsBalanced = redCount === playerCount / 2 && blueCount === playerCount / 2
+  const teamLo = Math.floor(playerCount / 2)
+  const teamHi = Math.ceil(playerCount / 2)
+  const teamsBalanced =
+    Math.min(redCount, blueCount) === teamLo &&
+    Math.max(redCount, blueCount) === teamHi &&
+    redCount + blueCount === playerCount
   const step2Valid = teamsBalanced
 
   const step3Valid = selectedHeroes.size >= minimum
@@ -756,7 +773,9 @@ function SetupWizard(): JSX.Element {
             <p role="alert" className="text-sm text-amber-300" data-testid="step-validation">
               {step === 0 && 'Every player needs a name.'}
               {step === 1 &&
-                `Teams must be balanced — assign ${playerCount / 2} players to each side.`}
+                (teamLo === teamHi
+                  ? `Teams must be balanced — assign ${teamHi} players to each side.`
+                  : `Teams must be balanced — teams must be ${teamHi} and ${teamLo} (one player uses Handicap cards).`)}
               {step === 3 &&
                 `Select at least ${minimum} heroes (currently ${selectedHeroes.size}).`}
             </p>

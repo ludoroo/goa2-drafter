@@ -17,6 +17,7 @@ import {
   buildSnakeTurns,
   coinFlipTeam,
   dealHands,
+  handicapTeamFor,
   randomAssignment,
   selectRandomDraftPool,
 } from '@/services/draft'
@@ -60,8 +61,9 @@ interface PersistedRecord {
 
 /**
  * Normalize a possibly-legacy persisted `Game` into the current shape. Older
- * records pre-date the addition of `turns`, `bans`, and `startTeam` — we
- * default them to empty/`red` so old games still load without throwing.
+ * records pre-date the addition of `turns`, `bans`, `startTeam`, and
+ * `handicapTeam` — we default them to empty/`red`/`null` so old games still
+ * load without throwing.
  */
 const normalizeGame = (raw: unknown): Game => {
   const g = raw as Partial<Game> & Record<string, unknown>
@@ -70,6 +72,7 @@ const normalizeGame = (raw: unknown): Game => {
     turns: Array.isArray(g.turns) ? (g.turns as DraftTurn[]) : [],
     bans: Array.isArray(g.bans) ? (g.bans as string[]) : [],
     startTeam: g.startTeam === 'blue' ? 'blue' : 'red',
+    handicapTeam: g.handicapTeam === 'red' || g.handicapTeam === 'blue' ? g.handicapTeam : null,
   }
 }
 
@@ -180,6 +183,7 @@ export class LocalGameStore implements GameStore {
     const now = Date.now()
     const organiserToken = generateToken()
     const startTeam = coinFlipTeam()
+    const handicapTeam = handicapTeamFor(players)
 
     let game: Game
     let picks: Pick[] = []
@@ -203,6 +207,7 @@ export class LocalGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     } else if (input.method === 'random') {
@@ -229,6 +234,7 @@ export class LocalGameStore implements GameStore {
         turns: [],
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     } else if (input.method === 'all-pick') {
@@ -246,6 +252,7 @@ export class LocalGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     } else if (input.method === 'random-draft') {
@@ -264,6 +271,7 @@ export class LocalGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     } else if (input.method === 'single-draft') {
@@ -288,6 +296,7 @@ export class LocalGameStore implements GameStore {
         turns: [],
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     } else {
@@ -304,6 +313,7 @@ export class LocalGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: now,
       }
     }

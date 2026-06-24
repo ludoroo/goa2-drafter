@@ -21,6 +21,7 @@ import {
   buildSnakeTurns,
   coinFlipTeam,
   dealHands,
+  handicapTeamFor,
   randomAssignment,
   selectRandomDraftPool,
 } from '@/services/draft'
@@ -52,6 +53,11 @@ export interface SnapshotGameRow {
   bans: string[]
   /** Coin-flip team that acts first. */
   start_team: TeamId
+  /**
+   * For odd player counts (5/7/9) the larger team uses Handicap cards; this is
+   * that team. `null` when teams are even. Informational only.
+   */
+  handicap_team: TeamId | null
   created_at: string
 }
 
@@ -110,9 +116,9 @@ export interface PickRow {
  * `SnapshotGameRow` shape — the snapshot path explicitly never selects
  * `organiser_token`, and the full `GameRow` extends `SnapshotGameRow` so
  * write-path callers also work without a cast. Back-compat: legacy rows
- * that pre-date the addition of `turns` / `bans` / `start_team` may have
- * these as null in jsonb — default them to empty arrays and 'red' to mirror
- * LocalGameStore's `normalizeGame`.
+ * that pre-date the addition of `turns` / `bans` / `start_team` /
+ * `handicap_team` may have these as null in jsonb — default them to empty
+ * arrays, 'red', and null to mirror LocalGameStore's `normalizeGame`.
  */
 export const gameFromRow = (row: SnapshotGameRow): Game => ({
   id: row.id,
@@ -125,6 +131,8 @@ export const gameFromRow = (row: SnapshotGameRow): Game => ({
   turns: Array.isArray(row.turns) ? [...row.turns] : [],
   bans: Array.isArray(row.bans) ? [...row.bans] : [],
   startTeam: row.start_team === 'blue' ? 'blue' : 'red',
+  handicapTeam:
+    row.handicap_team === 'red' || row.handicap_team === 'blue' ? row.handicap_team : null,
   createdAt: Date.parse(row.created_at),
 })
 
@@ -270,6 +278,7 @@ export class SupabaseGameStore implements GameStore {
     }))
 
     const startTeam = coinFlipTeam()
+    const handicapTeam = handicapTeamFor(players)
 
     let game: Game
     let picks: Pick[] = []
@@ -293,6 +302,7 @@ export class SupabaseGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     } else if (input.method === 'random') {
@@ -319,6 +329,7 @@ export class SupabaseGameStore implements GameStore {
         turns: [],
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     } else if (input.method === 'all-pick') {
@@ -336,6 +347,7 @@ export class SupabaseGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     } else if (input.method === 'random-draft') {
@@ -354,6 +366,7 @@ export class SupabaseGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     } else if (input.method === 'single-draft') {
@@ -378,6 +391,7 @@ export class SupabaseGameStore implements GameStore {
         turns: [],
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     } else {
@@ -394,6 +408,7 @@ export class SupabaseGameStore implements GameStore {
         turns,
         bans: [],
         startTeam,
+        handicapTeam,
         createdAt: createdAtMs,
       }
     }
@@ -410,6 +425,7 @@ export class SupabaseGameStore implements GameStore {
       turns: game.turns,
       bans: game.bans,
       start_team: game.startTeam,
+      handicap_team: game.handicapTeam,
       organiser_token: organiserToken,
       created_at: now,
     }
@@ -455,7 +471,7 @@ export class SupabaseGameStore implements GameStore {
     const { data: gameRow, error: gameErr } = await this.client
       .from('games')
       .select(
-        'id, status, player_count, method, hero_pool, draft_order, current_pick, turns, bans, start_team, created_at',
+        'id, status, player_count, method, hero_pool, draft_order, current_pick, turns, bans, start_team, handicap_team, created_at',
       )
       .eq('id', gameId)
       .maybeSingle<SnapshotGameRow>()

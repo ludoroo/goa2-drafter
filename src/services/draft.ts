@@ -1,17 +1,6 @@
 import type { DraftMethod, DraftTurn, Player, TeamId } from '@/types'
 
 /**
- * Snake team sequence: A, B, B, A, A, B, B, A, ...
- * Index 0 is A; subsequent picks come in same-team pairs that alternate.
- */
-const snakeTeamAt = (i: number): 'A' | 'B' => {
-  if (i === 0) return 'A'
-  // Pairs (1,2),(3,4),(5,6),... — even-indexed pairs (0,2,4,...) are B; odd pairs (1,3,5,...) are A.
-  const pairIndex = Math.floor((i - 1) / 2)
-  return pairIndex % 2 === 0 ? 'B' : 'A'
-}
-
-/**
  * Randomly assign exactly one hero per player from the pool.
  * Uses a Fisher-Yates shuffle seeded by `rng` (defaults to Math.random).
  */
@@ -37,7 +26,13 @@ export const randomAssignment = (
   return result
 }
 
-/** Heroes a single team needs — playerCount / 2. Throws on odd counts. */
+/**
+ * Heroes a single team needs — playerCount / 2. Throws on odd counts.
+ *
+ * Kept for legacy callers that only handle even player counts. Odd-aware
+ * paths (uneven team builders, `minimumPoolSize`) must NOT call this — they
+ * compute team sizes directly from the player split.
+ */
 export const heroesPerTeam = (playerCount: number): number => {
   if (playerCount % 2 !== 0) {
     throw new Error('player count must be even')
@@ -49,6 +44,10 @@ export const heroesPerTeam = (playerCount: number): number => {
  * Minimum hero pool size for a given draft method. Defaults to `playerCount`
  * (one hero per player) when no method is supplied, matching the legacy
  * single-arg behaviour used by snake/random/all-pick flows.
+ *
+ * Works for both even and odd player counts. For pick-and-ban the number of
+ * symmetric ban rounds is `floor(playerCount / 2)` — equal to the smaller
+ * team's size for odd counts and `playerCount / 2` for even counts.
  */
 export const minimumPoolSize = (playerCount: number, method?: DraftMethod): number => {
   switch (method) {
@@ -56,8 +55,10 @@ export const minimumPoolSize = (playerCount: number, method?: DraftMethod): numb
       return playerCount + 2
     case 'single-draft':
       return playerCount * 3
-    case 'pick-and-ban':
-      return playerCount + 2 * heroesPerTeam(playerCount)
+    case 'pick-and-ban': {
+      const banRounds = Math.floor(playerCount / 2)
+      return playerCount + 2 * banRounds
+    }
     case undefined:
     case 'snake':
     case 'random':
@@ -78,29 +79,75 @@ export const coinFlipTeam = (rng: () => number = Math.random): TeamId =>
 const sortBySeat = (players: Player[]): Player[] =>
   [...players].sort((x, y) => x.seat - y.seat || x.id.localeCompare(y.id))
 
-/** Split players by team and assert balanced teams. */
+/**
+ * Split players by team. Allows teams to differ by at most one player (for
+ * odd player counts 5/7/9). Throws if the imbalance is greater than one.
+ *
+ * Returns red/blue arrays sorted by seat (id breaks ties).
+ */
 const splitTeams = (players: Player[]): { red: Player[]; blue: Player[] } => {
   const red = players.filter((p) => p.team === 'red')
   const blue = players.filter((p) => p.team === 'blue')
-  if (red.length !== blue.length) {
-    throw new Error('teams must be equal size')
+  if (Math.abs(red.length - blue.length) > 1) {
+    throw new Error('teams must differ by at most one player')
   }
   return { red: sortBySeat(red), blue: sortBySeat(blue) }
 }
 
+/** Public counts of players per team. Does not validate balance. */
+export const teamCounts = (players: Player[]): { red: number; blue: number } => {
+  let red = 0
+  let blue = 0
+  for (const p of players) {
+    if (p.team === 'red') red++
+    else blue++
+  }
+  return { red, blue }
+}
+
 /**
- * One collective `pick` turn per player, alternating teams A,B,A,B,…
- * `playerId` is always null — any player on the active team may pick.
+ * For odd player counts (5/7/9), the larger team uses Handicap cards; this
+ * helper returns that larger team. Returns `null` for even teams.
+ *
+ * The handicap team is determined purely by which side has more players (for
+ * odd counts the larger team is the non-start team in this app's setup flow).
+ * Returns `null` when teams are even.
+ */
+export const handicapTeamFor = (players: Player[]): TeamId | null => {
+  const { red, blue } = teamCounts(players)
+  if (red === blue) return null
+  return red > blue ? 'red' : 'blue'
+}
+
+/**
+ * Collective alternating-pick turns (one per player) — used by All Pick and
+ * as the per-pick segment of pick-and-ban. Alternates A=startTeam, B=other,
+ * A, B, …; once a team has emitted its full size, the other team takes the
+ * remaining slots until the total equals `players.length`.
+ *
+ * Examples (5 players, red=2/blue=3, startTeam=red):
+ *   sequence → red, blue, red, blue, blue
+ *
+ * All turns are `{ kind: 'pick', playerId: null, team }`.
  */
 export const buildAllPickTurns = (players: Player[], startTeam: TeamId): DraftTurn[] => {
-  splitTeams(players) // validates equal teams
+  splitTeams(players) // validates teams differ by at most one
+  const counts = teamCounts(players)
   const a: TeamId = startTeam
   const b: TeamId = startTeam === 'red' ? 'blue' : 'red'
+  const remaining: Record<TeamId, number> = { red: counts.red, blue: counts.blue }
 
   const turns: DraftTurn[] = []
-  for (let i = 0; i < players.length; i++) {
-    const team: TeamId = i % 2 === 0 ? a : b
+  // Walk an alternating pointer A,B,A,B,… and skip a side when it has 0 left.
+  let i = 0
+  while (turns.length < players.length) {
+    const preferred: TeamId = i % 2 === 0 ? a : b
+    const fallback: TeamId = preferred === a ? b : a
+    const team: TeamId = remaining[preferred] > 0 ? preferred : fallback
+    if (remaining[team] === 0) break // safety — should never happen given splitTeams check
     turns.push({ kind: 'pick', playerId: null, team })
+    remaining[team]--
+    i++
   }
   return turns
 }
@@ -110,51 +157,108 @@ export const buildAllPickTurns = (players: Player[], startTeam: TeamId): DraftTu
  * `A, B, B, A, A, B, B, A, …` where A = `startTeam`. Each turn is a `pick`
  * with `playerId: null` — any player on the active team may claim the pick.
  *
- * Throws if the two teams are not equal in size.
+ * For uneven teams (sizes differ by 1) the standard snake pattern is walked,
+ * but whenever the team at that slot has already emitted its size, the
+ * other team takes the slot instead. The bigger team naturally absorbs the
+ * leftover slot(s) at the end.
+ *
+ * Concrete uneven examples (red=2/blue=3, startTeam=red):
+ *   base pattern (A=red, B=blue): red,blue,blue,red,red
+ *   after skip-when-full:         red,blue,blue,red,blue
+ *
+ * Throws if the two teams differ by more than one player.
  */
 export const buildSnakeTurns = (players: Player[], startTeam: TeamId): DraftTurn[] => {
-  splitTeams(players) // validates equal teams
+  splitTeams(players) // validates teams differ by at most one
+  const counts = teamCounts(players)
   const a: TeamId = startTeam
   const b: TeamId = startTeam === 'red' ? 'blue' : 'red'
+  const remaining: Record<TeamId, number> = { red: counts.red, blue: counts.blue }
 
   const turns: DraftTurn[] = []
   for (let i = 0; i < players.length; i++) {
-    const slot = snakeTeamAt(i)
-    const team: TeamId = slot === 'A' ? a : b
+    const slot: 'A' | 'B' = snakeSlotAt(i)
+    const preferred: TeamId = slot === 'A' ? a : b
+    const fallback: TeamId = preferred === a ? b : a
+    const team: TeamId = remaining[preferred] > 0 ? preferred : fallback
     turns.push({ kind: 'pick', playerId: null, team })
+    remaining[team]--
   }
   return turns
 }
 
 /**
+ * Snake team sequence slot: A, B, B, A, A, B, B, A, …
+ * Index 0 is A; subsequent picks come in same-team pairs that alternate.
+ */
+const snakeSlotAt = (i: number): 'A' | 'B' => {
+  if (i === 0) return 'A'
+  const pairIndex = Math.floor((i - 1) / 2)
+  return pairIndex % 2 === 0 ? 'B' : 'A'
+}
+
+/**
  * Rulebook pick-and-ban sequence. Collective team turns (`playerId: null`).
  *
- * Let A = startTeam, B = the other team, H = heroesPerTeam(players.length).
- * Each round r ∈ [0, H) contributes 4 turns in this order:
- *   - ban(leader), ban(other), pick(leader), pick(other)
- * The leader alternates by round: r even → A, r odd → B.
+ * Let A = startTeam, B = the other team. The smaller team's size determines
+ * how many symmetric ban rounds run (each round = 2 bans, leader alternates
+ * by round: r even → A, r odd → B). After bans, picks alternate A,B,A,B,…
+ * with the bigger team absorbing the leftover pick(s) when one team fills.
  *
- * Concrete sequence (matches the GoA2 rulebook):
- *   1st Ban: A,B   1st Pick: A,B
- *   2nd Ban: B,A   2nd Pick: B,A
- *   3rd Ban: A,B   3rd Pick: A,B   ...
+ * For even teams (red.size == blue.size == H) this reduces to the original
+ * sequence:
+ *   round r: ban(leader), ban(other), pick(leader), pick(other)
+ *   ban phase is interleaved with picks (preserved structure: round 0
+ *   = ban A, ban B, pick A, pick B; round 1 = ban B, ban A, pick B, pick A;
+ *   …) — total 4*H turns.
  *
- * Total turns = 4*H. Picks = 2*H = players.length. Bans = 2*H.
+ * For uneven teams the ban phase runs `min(red, blue)` rounds first (kept
+ * fully symmetric — equal bans per team), then the pick phase runs as a
+ * single skip-when-full alternation. The first round still starts with a
+ * ban from the leader to match the rulebook opener.
  */
 export const buildPickBanTurns = (players: Player[], startTeam: TeamId): DraftTurn[] => {
-  splitTeams(players) // validates equal teams
+  splitTeams(players) // validates teams differ by at most one
+  const counts = teamCounts(players)
   const a: TeamId = startTeam
   const b: TeamId = startTeam === 'red' ? 'blue' : 'red'
-  const h = heroesPerTeam(players.length)
+  const banRounds = Math.min(counts.red, counts.blue)
 
+  // Even path: keep the original interleaved ban/pick rounds verbatim so the
+  // existing 4-player and 6-player tests pass unchanged.
+  if (counts.red === counts.blue) {
+    const turns: DraftTurn[] = []
+    for (let r = 0; r < banRounds; r++) {
+      const leader: TeamId = r % 2 === 0 ? a : b
+      const other: TeamId = leader === 'red' ? 'blue' : 'red'
+      turns.push({ kind: 'ban', playerId: null, team: leader })
+      turns.push({ kind: 'ban', playerId: null, team: other })
+      turns.push({ kind: 'pick', playerId: null, team: leader })
+      turns.push({ kind: 'pick', playerId: null, team: other })
+    }
+    return turns
+  }
+
+  // Uneven path: ban phase first (symmetric), then pick phase with
+  // skip-when-full alternation starting from A.
   const turns: DraftTurn[] = []
-  for (let r = 0; r < h; r++) {
+  for (let r = 0; r < banRounds; r++) {
     const leader: TeamId = r % 2 === 0 ? a : b
     const other: TeamId = leader === 'red' ? 'blue' : 'red'
     turns.push({ kind: 'ban', playerId: null, team: leader })
     turns.push({ kind: 'ban', playerId: null, team: other })
-    turns.push({ kind: 'pick', playerId: null, team: leader })
-    turns.push({ kind: 'pick', playerId: null, team: other })
+  }
+
+  const remaining: Record<TeamId, number> = { red: counts.red, blue: counts.blue }
+  let i = 0
+  while (turns.filter((t) => t.kind === 'pick').length < players.length) {
+    const preferred: TeamId = i % 2 === 0 ? a : b
+    const fallback: TeamId = preferred === a ? b : a
+    const team: TeamId = remaining[preferred] > 0 ? preferred : fallback
+    if (remaining[team] === 0) break
+    turns.push({ kind: 'pick', playerId: null, team })
+    remaining[team]--
+    i++
   }
   return turns
 }
