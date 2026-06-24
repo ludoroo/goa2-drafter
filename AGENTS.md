@@ -13,7 +13,7 @@ Guidance for AI coding agents working on this codebase. Keep edits faithful to t
 
 The app is deployed as static assets to **GitHub Pages** under base path `/goa2-drafter/`. There is no server we control; **Supabase** (Postgres + Realtime) is the optional backend for shared mutable state. When Supabase env vars are absent, the app falls back to a fully working **localStorage** store for single-device play.
 
-The full design lives in [`PLAN.md`](./PLAN.md). This file is the day-to-day reference for agents.
+This file is the day-to-day reference for agents working on the codebase.
 
 ## Tech stack
 
@@ -86,7 +86,6 @@ goa2-drafter/
 │   └── schema.sql              # tables + RLS + RPCs
 ├── .github/workflows/deploy.yml
 ├── .env.example
-├── PLAN.md
 ├── AGENTS.md
 └── README.md
 ```

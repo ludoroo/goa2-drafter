@@ -4,7 +4,7 @@ A web app for setting up a game of [**Guards of Atlantis II**](https://boardgame
 
 Each player gets a private magic link to pick on their own device, with a shared live board for everyone to watch. No accounts, no logins.
 
-**Live:** https://lubaroli.github.io/goa2-drafter/
+**Live:** https://ludoroo.github.io/goa2-drafter/
 
 ## Draft methods
 
@@ -44,7 +44,6 @@ React 19 · TypeScript · Vite · React Router · Tailwind CSS v4 · Supabase (o
 
 ## More
 
-- [`PLAN.md`](./PLAN.md) — design, decisions, and data model.
 - [`AGENTS.md`](./AGENTS.md) — conventions and common tasks (incl. how to add hero art).
 
 ---
